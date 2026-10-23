@@ -28,31 +28,38 @@ Source map: `src/api` (HTTP API), `src/telegram` (Bot API client, polling, comma
 
 ## Setup
 
-1. **Network shared with the FFmpeg service** (once, if it does not exist):
+Everything below runs as your own user: no `sudo`, and everything the bot writes on the host belongs to you. (See [User and permissions](#user-and-permissions) for other choices.)
+
+1. **Choose the user.** Copy the environment file and set `BOT_UID`/`BOT_GID` to your own IDs:
+   ```sh
+   cp .env.example .env
+   sed -i "s/^BOT_UID=.*/BOT_UID=$(id -u)/; s/^BOT_GID=.*/BOT_GID=$(id -g)/" .env
+   ```
+2. **Directories.** Create them yourself; otherwise Docker would create them owned by root:
+   ```sh
+   mkdir -p config data work secrets
+   ```
+3. **Network shared with the FFmpeg service** (once, if it does not exist):
    ```sh
    docker network create --internal media_processing
    ```
-2. **FFmpeg consumer key.** Generate a key and add a `wyrmatron` consumer to the FFmpeg service's `api_keys.json`, then restart that service (it reads keys at startup):
+4. **FFmpeg consumer key.** Generate a key and add a `wyrmatron` consumer to the FFmpeg service's `api_keys.json`, then restart that service (it reads keys at startup):
    ```sh
-   mkdir -p secrets
-   docker run --rm wyrmatron:0.1.0 gen-key   # or build first: docker compose build
+   docker compose build
+   docker run --rm wyrmatron:0.1.0 gen-key
    ```
    ```json
    { "consumers": [ { "id": "wyrmatron", "keys": ["<key>"] } ] }
    ```
    Put the same key in `secrets/ffmpeg_key`.
-3. **Telegram token** in `secrets/telegram_token`.
-4. **Secret permissions.** Non-swarm Compose keeps host ownership, so the files must be readable by UID 10001:
+5. **Telegram token** in `secrets/telegram_token`. Keep both secrets private to you:
    ```sh
-   sudo chown 10001:10001 secrets/*
-   sudo chmod 0400 secrets/*
+   chmod 0400 secrets/*
    ```
-5. **Configuration directory.** `./config` is mounted at `/etc/wyrmatron`. It holds `config.toml` (mounted read-only), `whitelist.cfg` and `blocklist.cfg`:
+6. **Configuration.** `./config` is mounted at `/etc/wyrmatron`. It holds `config.toml` (mounted read-only), `whitelist.cfg` and `blocklist.cfg`, which the bot writes:
    ```sh
-   mkdir -p config
    cp config.example.toml config/config.toml
    cp whitelist.example.cfg config/whitelist.cfg
-   sudo chown -R 10001:10001 config      # the bot writes blocklist.cfg here
    ```
    In `config.toml`, set at least:
    - `telegram.admins`: numeric IDs; admins are always allowed.
@@ -60,14 +67,30 @@ Source map: `src/api` (HTTP API), `src/telegram` (Bot API client, polling, comma
    - API `consumers`: store only `key_sha256` from `wyrmatron gen-key`.
 
    Put every other account allowed to use the bot in `whitelist.cfg` (see [Account access](#account-access)).
-6. **Start:**
+7. **Start:**
    ```sh
-   cp .env.example .env
    docker compose up -d --build
    docker compose logs -f wyrmatron
    ```
+   The first log line shows the user it runs as, for example `"user":"uid 1000 gid 1000"`.
 
-The container runs as UID 10001 with a read-only root filesystem, no capabilities, `no-new-privileges`, a PID limit, 256 MiB of memory and 0.5 CPU. It writes only to `/data` (SQLite), `/work` (media spool) and a small `/tmp`. Keep `/data` on local storage, never NFS/SMB, because of SQLite's WAL. Back it up with `sqlite3 /data/wyrmatron.sqlite3 "VACUUM INTO '/data/backup.sqlite3'"`, or stop the container before copying.
+The container has a read-only root filesystem, no capabilities, `no-new-privileges`, a PID limit, 256 MiB of memory and 0.5 CPU. It writes only to `/data` (SQLite), `/work` (media spool), `/etc/wyrmatron` (the blocklist) and a small `/tmp`. Keep `data` on local storage, never NFS/SMB, because of SQLite's WAL. Back it up with `sqlite3 data/wyrmatron.sqlite3 "VACUUM INTO 'data/backup.sqlite3'"`, or stop the container before copying.
+
+## User and permissions
+
+The bot runs as whatever numeric UID/GID you give it. No account has to exist in the image, and it never needs root. `BOT_UID` and `BOT_GID` in `.env` set both the runtime user and the owner of the image's directories, so new named volumes match too. If they're unset, the image's default is 10001:10001.
+
+| How you run Docker | `BOT_UID` / `BOT_GID` | Result |
+|---|---|---|
+| Regular Docker, your user in the `docker` group | your `id -u` / `id -g` | The bot runs as you; `config`, `data` and `work` stay yours |
+| Rootless Docker | `0` / `0` | Container root *is* your unprivileged host user, so files on the host are yours. Capabilities are still dropped |
+| Rootless Podman | your `id -u` / `id -g`, plus `userns_mode: keep-id` under the service | Your IDs inside the container map to yours outside |
+| Dedicated service account | that account's IDs | `chown` the directories to it once |
+
+- **Startup check:** the bot checks that `data` and `work` are writable before it starts. If they aren't, it exits with the exact fix, for example `Data directory /data is not writable by uid 1000 gid 1000 … (chown -R 1000:1000 on the host)`.
+- **Config directory:** if it isn't writable, the bot still starts, but blocked accounts can't be saved to `blocklist.cfg` and are kept in memory only.
+- **Real root:** running as UID 0 in the host's user namespace (real root, not rootless) logs a warning.
+- **Rootless resource limits:** `mem_limit`, `cpus` and `pids_limit` need cgroup v2 with controller delegation. The rootless Docker and Podman documentation covers enabling it; without it, remove those lines from `compose.yaml`.
 
 ## Telegram
 

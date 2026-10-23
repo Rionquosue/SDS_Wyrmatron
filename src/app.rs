@@ -18,6 +18,7 @@ use crate::db::Db;
 use crate::extract::Extractor;
 use crate::fetch::Fetcher;
 use crate::ffmpeg::FfmpegClient;
+use crate::identity::{Identity, check_writable};
 use crate::media::service::MediaService;
 use crate::notify::{self, MessageSink, SendError};
 use crate::telegram::access::AccessList;
@@ -117,16 +118,22 @@ async fn shutdown_signal() {
 async fn run(config: Config) -> Result<()> {
     crate::http::init_tls();
     let config = Arc::new(config);
-    info!(version = env!("CARGO_PKG_VERSION"), "starting Wyrmatron");
-    let jobs_dir = config.storage.work_dir.join("jobs");
-    tokio::fs::create_dir_all(&jobs_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "creating {} (is the work directory mounted and writable?)",
-                jobs_dir.display()
-            )
-        })?;
+    let me = Identity::current();
+    info!(version = env!("CARGO_PKG_VERSION"), user = %me.describe(), "starting Wyrmatron");
+    if me.host_root {
+        warn!("running as root on the host; set BOT_UID/BOT_GID to an unprivileged user");
+    }
+    // Fail early, with a fix, if the mounted directories don't belong to us.
+    check_writable(&config.storage.data_dir, &me, "Data directory")?;
+    check_writable(&config.storage.work_dir.join("jobs"), &me, "Work directory")?;
+    if config.telegram.enabled {
+        // Not fatal: blocked accounts are still ignored, just not persisted.
+        if let Some(dir) = config.blocklist_path().parent()
+            && let Err(e) = check_writable(dir, &me, "Config directory (for blocklist.cfg)")
+        {
+            warn!(error = format!("{e:#}"), "the blocklist cannot be saved");
+        }
+    }
     let db = Db::open(&config.storage.database_path()).await?;
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();

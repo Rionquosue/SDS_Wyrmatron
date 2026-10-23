@@ -3,3 +3,6 @@
 /secrets/
 config.local.toml
 /config/
+/data/
+/work/
+.env

@@ -300,10 +300,21 @@ fn yes() -> bool {
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let path = path
+        let explicit = path
             .map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("WYRMATRON_CONFIG").map(PathBuf::from))
+            .or_else(|| std::env::var_os("WYRMATRON_CONFIG").map(PathBuf::from));
+        let path = explicit
+            .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+        // A config that exists but cannot be read must never fall back to
+        // defaults; neither may one that was named explicitly but is missing.
+        std::fs::read_to_string(&path)
+            .map(drop)
+            .or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound if explicit.is_none() => Ok(()),
+                _ => Err(e),
+            })
+            .with_context(|| format!("cannot read configuration {}", path.display()))?;
         let mut figment = Figment::new();
         if path.exists() {
             figment = figment.merge(Toml::file(&path));
@@ -427,6 +438,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_unreadable_config_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.toml");
+        let err = Config::load(Some(&missing)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot read configuration"),
+            "{err:#}"
+        );
+        // A directory where the file should be cannot be read as a file.
+        let not_a_file = dir.path().join("config.toml");
+        std::fs::create_dir(&not_a_file).unwrap();
+        assert!(Config::load(Some(&not_a_file)).is_err());
+    }
+
+    #[test]
     #[allow(clippy::result_large_err)]
     fn access_lists_live_next_to_the_config_file() {
         figment::Jail::expect_with(|jail| {
@@ -450,7 +476,9 @@ mod tests {
     fn non_config_environment_variables_are_ignored() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("WYRMATRON_LOG_FORMAT", "text");
-            jail.set_env("WYRMATRON_CONFIG", "/nonexistent.toml");
+            jail.create_file("empty.toml", "")?;
+            let file = jail.directory().join("empty.toml");
+            jail.set_env("WYRMATRON_CONFIG", file.display());
             jail.set_env("WYRMATRON_TELEGRAM__ENABLED", "false");
             let c = Config::load(None).map_err(|e| e.to_string())?;
             assert!(!c.telegram.enabled);

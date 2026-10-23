@@ -11,6 +11,7 @@ mod extract;
 mod fetch;
 mod ffmpeg;
 mod http;
+mod identity;
 mod media;
 mod notify;
 mod telegram;

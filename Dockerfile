@@ -3,6 +3,10 @@
 # emulating the target, then copies the static musl binary into Alpine.
 ARG RUST_IMAGE=rust:1.97.0-alpine3.24@sha256:ec9c91e77119ce498cd1e87d96d77e0f75b2cee21655a29bc2bf75a51a2b20a4
 ARG ALPINE_IMAGE=alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+# The user the bot runs as. Compose passes BOT_UID/BOT_GID from .env; any
+# numeric IDs work, and no account needs to exist in the image.
+ARG BOT_UID=10001
+ARG BOT_GID=10001
 
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
 ARG TARGETARCH
@@ -30,15 +34,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi
 
 FROM ${ALPINE_IMAGE}
-RUN apk add --no-cache ca-certificates \
- && addgroup -g 10001 wyrmatron \
- && adduser -D -H -u 10001 -G wyrmatron wyrmatron \
+ARG BOT_UID
+ARG BOT_GID
+RUN case "${BOT_UID}:${BOT_GID}" in \
+      *[!0-9:]*|:*|*:) echo "BOT_UID and BOT_GID must be numeric" >&2; exit 1 ;; \
+    esac \
+ && apk add --no-cache ca-certificates \
  && mkdir -p /data /work /etc/wyrmatron \
  # New named volumes inherit this ownership; /etc/wyrmatron holds the
  # access lists the bot writes.
- && chown wyrmatron:wyrmatron /data /work /etc/wyrmatron
+ && chown "${BOT_UID}:${BOT_GID}" /data /work /etc/wyrmatron
 COPY --from=build /out/wyrmatron /usr/local/bin/wyrmatron
-USER 10001:10001
+USER ${BOT_UID}:${BOT_GID}
 ENV WYRMATRON_CONFIG=/etc/wyrmatron/config.toml
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
