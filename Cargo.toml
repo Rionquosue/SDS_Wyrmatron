@@ -1,0 +1,47 @@
+[package]
+name = "wyrmatron"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["multipart"] }
+base64 = "0.23.1"
+bytes = "1.12.1"
+figment = { version = "0.10.19", features = ["toml", "env"] }
+futures-util = "0.3.34"
+hex = "0.4.3"
+mimalloc = "0.1.52"
+rand = "0.10.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls-no-provider"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite_migration = "2.6.0"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+subtle = "2.6.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs", "io-util", "net"] }
+tokio-rusqlite = "0.8.0"
+tokio-stream = "0.1.19"
+tokio-util = { version = "0.7.20", features = ["io", "rt"] }
+tower = { version = "0.5.3", features = ["limit", "load-shed", "timeout", "util"] }
+tower-http = { version = "0.7.1", features = ["limit", "timeout", "trace", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+url = "2.5.8"
+uuid = { version = "1.28.0", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+wiremock = "0.6.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# Keep unwinding: a panicking job task must fail only that job.
+panic = "unwind"
