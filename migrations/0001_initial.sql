@@ -25,6 +25,8 @@ CREATE TABLE notifications (
     dedupe_key      TEXT,
     request_hash    TEXT NOT NULL,
     state           TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'sent', 'failed')),
+    -- Long bodies are sent as several messages; this many were delivered.
+    parts_sent      INTEGER NOT NULL DEFAULT 0,
     attempts        INTEGER NOT NULL DEFAULT 0,
     next_attempt_at INTEGER NOT NULL,
     lease_until     INTEGER,

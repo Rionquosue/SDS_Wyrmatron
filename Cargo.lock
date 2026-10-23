@@ -2295,6 +2295,7 @@ dependencies = [
  "figment",
  "futures-util",
  "hex",
+ "http-body-util",
  "mimalloc",
  "rand",
  "reqwest",
