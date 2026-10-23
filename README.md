@@ -187,12 +187,14 @@ Verified in the development environment (Rust 1.97.0):
   - it used about 18 MB RSS at idle;
   - it exited cleanly on SIGTERM.
 
-Not verified here:
+- In GitHub Actions on amd64 and arm64 runners, the image builds (17.5–18 MB). `scripts/container-smoke.sh` passes against it: read-only root, non-root user, no capabilities, health, auth, notifications, the Kuma hook, graceful stop, and the outbox surviving container replacement. The Trivy scan reports no fixable high or critical findings.
+
+Not verified yet:
 
 - **Telegram:** no bot token was available, so there were no live Bot API calls.
 - **FFmpeg service:** not run against the real service; the client is tested against a mock built from its API contract.
 - **Media downloads:** not run against real X/Twitter or Bluesky media hosts. Those hosts were blocked in the development environment; the metadata APIs were reachable.
-- **Docker:** the image build and `scripts/container-smoke.sh` need a Docker daemon. The CI workflow runs both on amd64 and arm64.
+
 
 ## Known limitations
 
