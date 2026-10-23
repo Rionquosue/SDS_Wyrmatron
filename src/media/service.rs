@@ -59,7 +59,8 @@ impl MediaService {
     }
 
     pub async fn create(&self, job: NewJob) -> anyhow::Result<Created> {
-        let created = jobs::create(&self.db, jobs::new_id(), job).await?;
+        let limit = Some(self.config.media.max_active_jobs_per_owner);
+        let created = jobs::create_limited(&self.db, jobs::new_id(), job, limit).await?;
         if matches!(created, Created::New(_)) {
             self.wake.notify_waiters();
             self.wake.notify_one();
@@ -187,6 +188,9 @@ impl MediaJobs for MediaService {
         match created {
             Created::New(id) | Created::Existing(id) => Ok(id),
             Created::Conflict => Err("Could not queue the job; try again.".into()),
+            Created::Limited(n) => Err(format!(
+                "You already have {n} jobs in progress. Wait for one to finish."
+            )),
         }
     }
 

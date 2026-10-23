@@ -147,6 +147,15 @@ fn accepted(state: &AppState, created: Created) -> Result<Response, ApiError> {
     let (status, id) = match created {
         Created::New(id) => (StatusCode::ACCEPTED, id),
         Created::Existing(id) => (StatusCode::OK, id),
+        Created::Limited(n) => {
+            let mut e = ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "consumer_limit",
+                format!("This key already has {n} unfinished jobs."),
+            );
+            e.retry_after = Some(30);
+            return Err(e);
+        }
         Created::Conflict => {
             return Err(ApiError::conflict(
                 "idempotency_conflict",

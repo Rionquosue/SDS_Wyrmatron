@@ -188,6 +188,18 @@ impl AccessList {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
             .take(32)
             .collect();
+        // One entry per line: nothing caller-supplied may add lines.
+        let context: String = context
+            .chars()
+            .map(|c| {
+                if c.is_ascii_graphic() || c == ' ' {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .take(80)
+            .collect();
         let line = format!(
             "{}\t# @{} blocked {} ({})\n",
             user.id,
@@ -331,6 +343,20 @@ mod tests {
             Verdict::NewlyBlocked
         );
         assert_eq!(a.check(&user(9, None), "private chat"), Verdict::Blocked);
+    }
+
+    #[test]
+    fn context_cannot_inject_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = lists(dir.path());
+        a.check(
+            &user(7, Some("x\n42")),
+            "chat 1 command /gif\n42 # injected\r\n43",
+        );
+        let text = std::fs::read_to_string(a.blocklist_path()).unwrap();
+        let entries: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(entries.len(), 1, "{text}");
+        assert_eq!(parse_ids(&text), HashSet::from([7]));
     }
 
     #[test]

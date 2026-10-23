@@ -26,6 +26,15 @@ pub fn parse_command<'a>(
         Some((n, t)) => (n, Some(t)),
         None => (raw, None),
     };
+    // Telegram's command syntax: 1-32 of [A-Za-z0-9_]. Anything else
+    // (control characters, lookalike letters, spaces) is not a command, so it
+    // can never reach logs, replies or the blocklist as one.
+    let valid = |s: &str, max: usize| {
+        !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    if !valid(name, 32) || target.is_some_and(|t| !valid(t, 64)) {
+        return None;
+    }
     if target.is_some_and(|t| !t.eq_ignore_ascii_case(my_username)) {
         return None;
     }
@@ -94,6 +103,16 @@ mod tests {
                 .name,
             "help"
         );
+        // Malformed or lookalike command names are not commands.
+        for bad in ["/gif\n42", "/g\u{200b}if", "/gіf", "/", "/a b"] {
+            let len = bad.encode_utf16().count();
+            assert!(
+                parse_command(bad, &[entity("bot_command", 0, len)], "wyrmbot").is_none(),
+                "{bad:?}"
+            );
+        }
+        let long = format!("/{}", "a".repeat(33));
+        assert!(parse_command(&long, &[entity("bot_command", 0, 34)], "wyrmbot").is_none());
         // A command later in the message is not a command.
         assert!(parse_command("see /gif", &[entity("bot_command", 4, 4)], "wyrmbot").is_none());
     }

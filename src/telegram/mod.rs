@@ -24,14 +24,25 @@ use types::Update;
 const OFFSET_KEY: &str = "telegram_offset";
 
 /// Stores updates and the next offset atomically.
-pub async fn store_updates(db: &Db, updates: Vec<Update>) -> Result<usize> {
-    let Some(max) = updates.iter().map(|u| u.update_id).max() else {
-        return Ok(0);
-    };
+/// Stores raw updates and the next offset atomically. Each update is parsed
+/// later on its own, so a malformed one is skipped instead of blocking the
+/// queue; only `update_id` is needed here.
+pub async fn store_updates(db: &Db, updates: Vec<serde_json::Value>) -> Result<usize> {
     let rows: Vec<(i64, String)> = updates
         .iter()
-        .map(|u| Ok((u.update_id, serde_json::to_string(u)?)))
-        .collect::<Result<_>>()?;
+        .filter_map(
+            |u| match u.get("update_id").and_then(serde_json::Value::as_i64) {
+                Some(id) => Some((id, u.to_string())),
+                None => {
+                    warn!("dropping an update without a numeric update_id");
+                    None
+                }
+            },
+        )
+        .collect();
+    let Some(max) = rows.iter().map(|(id, _)| *id).max() else {
+        return Ok(0);
+    };
     db.write(move |tx| {
         let t = now();
         let mut n = 0;
@@ -185,16 +196,25 @@ mod tests {
     #[tokio::test]
     async fn stores_updates_and_offset_atomically() {
         let db = Db::open_in_memory().await.unwrap();
-        let u = |id| Update {
-            update_id: id,
-            message: None,
-            callback_query: None,
-        };
+        let u = |id: i64| serde_json::json!({ "update_id": id });
         assert_eq!(store_updates(&db, vec![u(5), u(6)]).await.unwrap(), 2);
         assert_eq!(db.get_kv(OFFSET_KEY).await.unwrap().as_deref(), Some("7"));
         // A redelivered update is not stored twice.
         assert_eq!(store_updates(&db, vec![u(6), u(7)]).await.unwrap(), 1);
         assert_eq!(db.get_kv(OFFSET_KEY).await.unwrap().as_deref(), Some("8"));
         assert_eq!(store_updates(&db, vec![]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_updates_do_not_stall_the_queue() {
+        let db = Db::open_in_memory().await.unwrap();
+        // Wrong types inside an update must not fail the batch.
+        let batch = vec![
+            serde_json::json!({ "update_id": 10, "message": { "chat": "not an object", "message_id": "x" } }),
+            serde_json::json!({ "no_id": true }),
+            serde_json::json!({ "update_id": 11, "message": { "message_id": 1, "chat": { "id": 5, "type": "private" } } }),
+        ];
+        assert_eq!(store_updates(&db, batch).await.unwrap(), 2);
+        assert_eq!(db.get_kv(OFFSET_KEY).await.unwrap().as_deref(), Some("12"));
     }
 }

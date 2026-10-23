@@ -187,6 +187,9 @@ pub struct MediaConfig {
     pub gif_max_seconds: f64,
     pub gif_target_bytes: u64,
     pub download_workers: usize,
+    /// Unfinished jobs allowed per Telegram user or API consumer, so one
+    /// account (or a compromised one) cannot flood the queue.
+    pub max_active_jobs_per_owner: u32,
 }
 
 impl Default for MediaConfig {
@@ -196,6 +199,7 @@ impl Default for MediaConfig {
             gif_max_seconds: 30.0,
             gif_target_bytes: 8 * 1024 * 1024,
             download_workers: 2,
+            max_active_jobs_per_owner: 3,
         }
     }
 }

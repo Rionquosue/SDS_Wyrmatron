@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use super::types::{File, InlineKeyboard, Message, Update, User};
+use super::types::{File, InlineKeyboard, Message, User};
 use crate::notify::{MessageSink, SendError};
 
 #[derive(Debug, thiserror::Error)]
@@ -210,11 +210,13 @@ impl Bot {
     }
 
     /// Long poll. The request timeout exceeds the poll timeout (SDS §4).
+    /// Long poll. Updates are returned as raw JSON so that one update with an
+    /// unexpected shape cannot fail the whole batch (and stall the offset).
     pub async fn get_updates(
         &self,
         offset: i64,
         poll_timeout: Duration,
-    ) -> Result<Vec<Update>, TgError> {
+    ) -> Result<Vec<Value>, TgError> {
         let body = json!({
             "offset": offset,
             "timeout": poll_timeout.as_secs(),

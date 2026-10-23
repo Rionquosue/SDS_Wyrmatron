@@ -185,14 +185,29 @@ pub enum Created {
     New(String),
     Existing(String),
     Conflict,
+    /// The owner already has this many unfinished jobs.
+    Limited(u32),
 }
 
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().simple().to_string()
 }
 
-/// Inserts a queued job, honouring the owner's idempotency key.
+/// Inserts a queued job without a per-owner limit (tests only).
+#[cfg(test)]
 pub async fn create(db: &Db, id: String, job: NewJob) -> Result<Created> {
+    create_limited(db, id, job, None).await
+}
+
+/// Inserts a queued job, honouring the owner's idempotency key and refusing
+/// a new job while the owner already has
+/// `max_active` unfinished ones. The count and insert share a transaction.
+pub async fn create_limited(
+    db: &Db,
+    id: String,
+    job: NewJob,
+    max_active: Option<u32>,
+) -> Result<Created> {
     db.write(move |tx| {
         if let Some(key) = &job.idempotency_key {
             let existing: Option<(String, Option<String>)> = tx
@@ -204,6 +219,16 @@ pub async fn create(db: &Db, id: String, job: NewJob) -> Result<Created> {
                 .optional()?;
             if let Some((existing, hash)) = existing {
                 return Ok(if hash == job.request_hash { Created::Existing(existing) } else { Created::Conflict });
+            }
+        }
+        if let Some(max) = max_active {
+            let active: u32 = tx.query_row(
+                &format!("SELECT COUNT(*) FROM jobs WHERE owner_kind = ?1 AND owner_id = ?2 AND state IN ({ACTIVE_STATES})"),
+                params![job.owner_kind, job.owner_id],
+                |r| r.get(0),
+            )?;
+            if active >= max {
+                return Ok(Created::Limited(max));
             }
         }
         let t = now();
@@ -473,6 +498,47 @@ mod tests {
             Some("resolving")
         );
         assert!(renew_lease(&db, &id, 60).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn limits_unfinished_jobs_per_owner() {
+        let db = Db::open_in_memory().await.unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                create_limited(&db, new_id(), sample(None), Some(2))
+                    .await
+                    .unwrap(),
+                Created::New(_)
+            ));
+        }
+        assert_eq!(
+            create_limited(&db, new_id(), sample(None), Some(2))
+                .await
+                .unwrap(),
+            Created::Limited(2)
+        );
+        // Another owner is unaffected.
+        let mut other = sample(None);
+        other.owner_id = "someone-else".into();
+        assert!(matches!(
+            create_limited(&db, new_id(), other, Some(2)).await.unwrap(),
+            Created::New(_)
+        ));
+        // Finished jobs no longer count.
+        db.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE jobs SET state = 'completed' WHERE owner_id = 'media'",
+                [],
+            )?)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            create_limited(&db, new_id(), sample(None), Some(2))
+                .await
+                .unwrap(),
+            Created::New(_)
+        ));
     }
 
     #[tokio::test]
