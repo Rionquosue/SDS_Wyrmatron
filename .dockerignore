@@ -1,0 +1,6 @@
+target
+.git
+secrets
+*.sqlite3*
+config.toml
+.env

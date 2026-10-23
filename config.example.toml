@@ -1,0 +1,97 @@
+# Wyrmatron configuration. Copy to config.toml and mount it read-only at
+# /etc/wyrmatron/config.toml. Any value can be overridden with an environment
+# variable: WYRMATRON_<SECTION>__<KEY>, for example WYRMATRON_TELEGRAM__ENABLED=false.
+# Unknown keys are rejected.
+
+[server]
+listen = "0.0.0.0:8080"
+# json_body_limit = 65536
+# notification_concurrency = 16
+# media_concurrency = 4
+# worker_threads = 2
+
+[storage]
+data_dir = "/data"
+work_dir = "/work"
+# Budget for spooled sources, results and retained downloads (bytes).
+work_budget_bytes = 1073741824
+# Completed API results stay downloadable this long.
+download_retention_secs = 3600
+metadata_retention_secs = 604800
+
+[telegram]
+enabled = true
+token_file = "/run/secrets/telegram_token"
+# Numeric IDs only: usernames can change. Ask @userinfobot or check the bot's
+# logs for IDs.
+allowed_users = [123456789]
+# Group or supergroup chat IDs where commands are accepted (negative numbers).
+allowed_chats = []
+# Admins may see and cancel any job.
+admins = [123456789]
+# For a Local Bot API server, point this at it and raise the size limits.
+# api_base = "https://api.telegram.org"
+# max_download_bytes = 20000000
+# max_upload_bytes = 50000000
+
+[ffmpeg]
+enabled = true
+base_url = "http://ffmpeg:8080"
+# Must match the "wyrmatron" consumer in the FFmpeg service's api_keys.json.
+key_file = "/run/secrets/ffmpeg_key"
+# Keep in step with the FFmpeg service's PROCESS_TIMEOUT_SECONDS and
+# UPLOAD_TIMEOUT_SECONDS (service 0.2.0 also advertises them).
+process_timeout_secs = 120
+upload_timeout_secs = 120
+
+[media]
+max_source_bytes = 209715200
+gif_max_seconds = 30.0
+gif_target_bytes = 8388608
+download_workers = 2
+
+[fetch]
+# fxtwitter_api = "https://api.fxtwitter.com"
+# fxbsky_api = "https://api.fxbsky.app"
+# plc_directory = "https://plc.directory"
+# Explicit proxy for public fetches (development only; never read from the
+# environment).
+# proxy = "http://127.0.0.1:3128"
+
+# Human-facing destination names mapped to chats (and forum topics).
+[destinations.ops]
+chat_id = -1001234567890
+# thread_id = 42
+
+[destinations.personal]
+chat_id = 123456789
+
+# API consumers. Generate a key with `wyrmatron gen-key`; store only the hash.
+[[consumers]]
+id = "uptime-kuma"
+key_sha256 = ["0000000000000000000000000000000000000000000000000000000000000000"]
+scopes = ["notify"]
+destinations = ["ops"]
+
+[[consumers]]
+id = "scripts"
+key_sha256 = ["1111111111111111111111111111111111111111111111111111111111111111"]
+scopes = ["notify", "media"]
+destinations = ["personal"]
+
+# Uptime Kuma webhook routes: POST /v1/hooks/uptime-kuma/<route id>.
+# With auth = "bearer", Kuma sends the consumer key in an additional header:
+#   {"Authorization": "Bearer <key>"}
+[uptime_kuma.main]
+destination = "ops"
+auth = "bearer"
+suppress_pending = true
+suppress_maintenance = false
+
+# For Kuma versions without custom headers: the path segment is the secret.
+# Generate one with `wyrmatron gen-key` and put its hash here; the label
+# ("legacy") is not part of the URL.
+# [uptime_kuma.legacy]
+# destination = "ops"
+# auth = "route_secret"
+# secret_sha256 = "..."

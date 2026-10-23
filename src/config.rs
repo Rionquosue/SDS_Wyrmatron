@@ -297,7 +297,11 @@ impl Config {
             figment = figment.merge(Toml::file(&path));
         }
         let config: Config = figment
-            .merge(Env::prefixed("WYRMATRON_").ignore(&["config"]).split("__"))
+            .merge(
+                Env::prefixed("WYRMATRON_")
+                    .ignore(&["config", "log_format"])
+                    .split("__"),
+            )
             .extract()
             .with_context(|| format!("reading configuration from {}", path.display()))?;
         config.validate()?;
@@ -391,6 +395,20 @@ mod tests {
                 .to_string()
                 .contains("unknown destination")
         );
+    }
+
+    #[test]
+    // figment::Jail's closure returns figment's large error type.
+    #[allow(clippy::result_large_err)]
+    fn non_config_environment_variables_are_ignored() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("WYRMATRON_LOG_FORMAT", "text");
+            jail.set_env("WYRMATRON_CONFIG", "/nonexistent.toml");
+            jail.set_env("WYRMATRON_TELEGRAM__ENABLED", "false");
+            let c = Config::load(None).map_err(|e| e.to_string())?;
+            assert!(!c.telegram.enabled);
+            Ok(())
+        });
     }
 
     #[test]

@@ -1,0 +1,46 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the toolchain, components and musl targets.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --locked
+      - name: Dependency audit
+        run: |
+          cargo install --locked cargo-audit@0.22.2
+          cargo audit
+      - name: Build image
+        run: docker build --pull -t wyrmatron:test .
+      - name: Container checks
+        timeout-minutes: 10
+        run: sh scripts/container-smoke.sh wyrmatron:test
+      - name: Image size
+        run: |
+          docker image inspect wyrmatron:test --format '{{.Size}}' | awk '{ printf "image size %.1f MB\n", $1 / 1000000 }'
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: wyrmatron:test
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

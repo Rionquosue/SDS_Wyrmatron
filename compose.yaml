@@ -1,0 +1,66 @@
+services:
+  wyrmatron:
+    build: .
+    image: wyrmatron:0.1.0
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    # Workers release their leases on SIGTERM; give them time.
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      # Database, WAL and SHM files must live together on local storage (not NFS/SMB).
+      - ${BOT_DATA_DIR:-wyrmatron-data}:/data
+      - ${BOT_WORK_DIR:-wyrmatron-work}:/work
+      - ${BOT_CONFIG:-./config.toml}:/etc/wyrmatron/config.toml:ro
+    secrets:
+      - telegram_token
+      - ffmpeg_key
+    # Publish only if a caller outside Docker needs the API, and only on loopback
+    # or behind an HTTPS reverse proxy:
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    networks:
+      - bot_services
+      - media_processing
+      - bot_egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Local callers such as Uptime Kuma join this network by name.
+  bot_services:
+    name: ${BOT_SERVICES_NETWORK:-bot_services}
+    internal: true
+  # Shared with the FFmpeg service; created once with
+  # `docker network create --internal media_processing`.
+  media_processing:
+    external: true
+    name: ${MEDIA_NETWORK:-media_processing}
+  # Outbound access to Telegram, FxEmbed and media hosts.
+  bot_egress: {}
+
+volumes:
+  wyrmatron-data:
+  wyrmatron-work:
+
+secrets:
+  # Non-swarm Compose keeps host ownership and mode: make these files
+  # readable by UID 10001 (for example chown 10001 and chmod 0400).
+  telegram_token:
+    file: ${TELEGRAM_TOKEN_PATH:-./secrets/telegram_token}
+  ffmpeg_key:
+    file: ${FFMPEG_KEY_PATH:-./secrets/ffmpeg_key}
