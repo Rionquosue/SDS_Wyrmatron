@@ -6,10 +6,11 @@ image="${1:-wyrmatron:test}"
 suffix="$$"
 name="wyrmatron-smoke-$suffix"
 volume="wyrmatron-smoke-data-$suffix"
+work="wyrmatron-smoke-work-$suffix"
 scratch="$(mktemp -d)"
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker volume rm "$volume" >/dev/null 2>&1 || true
+  docker volume rm "$volume" "$work" >/dev/null 2>&1 || true
   rm -rf "$scratch"
 }
 trap cleanup EXIT INT TERM
@@ -41,7 +42,7 @@ start() {
   docker run -d --name "$name" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --pids-limit 64 --memory 256m --cpus 0.5 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700 \
-    -v "$volume:/data" -v "$scratch/config:/etc/wyrmatron" \
+    -v "$volume:/data" -v "$work:/work" -v "$scratch/config:/etc/wyrmatron" \
     -v "$scratch/config/config.toml:/etc/wyrmatron/config.toml:ro" \
     -p 127.0.0.1::8080 "$image" >/dev/null
   for _ in $(seq 1 30); do

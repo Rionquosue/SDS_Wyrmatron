@@ -118,9 +118,15 @@ async fn run(config: Config) -> Result<()> {
     crate::http::init_tls();
     let config = Arc::new(config);
     info!(version = env!("CARGO_PKG_VERSION"), "starting Wyrmatron");
-    tokio::fs::create_dir_all(config.storage.work_dir.join("jobs"))
+    let jobs_dir = config.storage.work_dir.join("jobs");
+    tokio::fs::create_dir_all(&jobs_dir)
         .await
-        .context("creating the work directory")?;
+        .with_context(|| {
+            format!(
+                "creating {} (is the work directory mounted and writable?)",
+                jobs_dir.display()
+            )
+        })?;
     let db = Db::open(&config.storage.database_path()).await?;
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
