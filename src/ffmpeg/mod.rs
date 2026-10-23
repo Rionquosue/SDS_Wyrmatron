@@ -320,14 +320,15 @@ impl FfmpegClient {
         }
         let caps = self.require(&op, format)?;
         if let Some(max) = caps.limit("max_upload_bytes")
-            && input.size > max {
-                return Err(FfError::Rejected {
-                    status: 413,
-                    code: "upload_too_large".into(),
-                    field: None,
-                    retryable: false,
-                });
-            }
+            && input.size > max
+        {
+            return Err(FfError::Rejected {
+                status: 413,
+                code: "upload_too_large".into(),
+                field: None,
+                retryable: false,
+            });
+        }
         let _permit = self.permit().await?;
         let key = attempt.key();
         let (job_id, step, number) = (attempt.job_id.clone(), attempt.step, attempt.number);
