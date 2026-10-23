@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod kuma;
+mod media;
 mod notifications;
 
 use std::sync::Arc;
@@ -31,6 +32,8 @@ pub struct AppState {
     /// Wakes the notification worker after a row is stored.
     pub outbox: Arc<Notify>,
     pub status: Arc<dyn StatusProvider>,
+    /// Absent when media processing is not configured.
+    pub media: Option<Arc<crate::media::service::MediaService>>,
 }
 
 /// Runtime state reported by `/v1/capabilities` and readiness, supplied by
@@ -209,12 +212,12 @@ async fn overloaded(_: BoxError) -> ApiError {
 pub fn router(state: AppState) -> Router {
     let cfg = &state.config.server;
     let authenticated = middleware::from_fn_with_state(state.clone(), auth::require_consumer);
-    let limit = |n: usize| {
+    let limit = |n: usize, timeout_secs: u64| {
         ServiceBuilder::new()
             .layer(HandleErrorLayer::new(overloaded))
             .load_shed()
             .concurrency_limit(n)
-            .timeout(Duration::from_secs(cfg.request_timeout_secs))
+            .timeout(Duration::from_secs(timeout_secs))
     };
 
     let notify_routes = Router::new()
@@ -224,7 +227,29 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/hooks/uptime-kuma/{route_id}", post(kuma::hook))
         .layer(DefaultBodyLimit::max(cfg.json_body_limit))
-        .layer(limit(cfg.notification_concurrency));
+        .layer(limit(cfg.notification_concurrency, cfg.request_timeout_secs));
+
+    // Media routes have their own limits, separate from notifications.
+    let media_routes = Router::new()
+        .route("/v1/media/jobs", post(media::create_job))
+        .route(
+            "/v1/jobs/{id}",
+            get(media::status).delete(media::delete),
+        )
+        .route("/v1/jobs/{id}/download", get(media::download))
+        .route_layer(authenticated.clone())
+        .layer(DefaultBodyLimit::max(cfg.json_body_limit))
+        .layer(limit(cfg.media_concurrency, cfg.request_timeout_secs));
+
+    // Uploads stream to disk: no buffered body limit, a hard cap on bytes
+    // instead, and a timeout long enough for large files.
+    let upload_cap = state.config.media.max_source_bytes as usize + 64 * 1024;
+    let upload_routes = Router::new()
+        .route("/v1/media/uploads", post(media::upload))
+        .route_layer(authenticated.clone())
+        .layer(DefaultBodyLimit::disable())
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(upload_cap))
+        .layer(limit(cfg.media_concurrency, 900));
 
     let general = Router::new()
         .route(
@@ -237,6 +262,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .merge(notify_routes)
+        .merge(media_routes)
+        .merge(upload_routes)
         .merge(general)
         .with_state(state)
 }
@@ -318,6 +345,7 @@ pub mod tests {
             consumers,
             outbox: Arc::new(Notify::new()),
             status: Arc::new(NoMedia),
+            media: None,
         }
     }
 
