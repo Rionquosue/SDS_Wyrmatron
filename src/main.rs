@@ -4,6 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod api;
 mod config;
 mod db;
+mod ffmpeg;
 mod http;
 mod media;
 mod notify;
