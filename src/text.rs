@@ -53,7 +53,12 @@ fn tokens(html: &str) -> Vec<Token<'_>> {
 }
 
 fn tag_name(tag: &str) -> &str {
-    tag.trim_start_matches('<').trim_start_matches('/').trim_end_matches('>').split_whitespace().next().unwrap_or("")
+    tag.trim_start_matches('<')
+        .trim_start_matches('/')
+        .trim_end_matches('>')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
 }
 
 /// Splits Telegram HTML into messages of at most `limit` visible characters

@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::db::{now, Db};
+use crate::db::{Db, now};
 use crate::text;
 
 const MAX_ATTEMPTS: i64 = 12;
@@ -33,7 +33,12 @@ pub enum SendError {
 
 #[async_trait]
 pub trait MessageSink: Send + Sync {
-    async fn send_html(&self, chat_id: i64, thread_id: Option<i64>, html: &str) -> Result<(), SendError>;
+    async fn send_html(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        html: &str,
+    ) -> Result<(), SendError>;
 }
 
 pub struct NewNotification {
@@ -149,7 +154,10 @@ async fn deliver(db: &Db, sink: &dyn MessageSink, n: Claimed) -> Result<()> {
                 sent += 1;
                 let (id, s) = (n.id.clone(), sent as i64);
                 db.write(move |tx| {
-                    tx.execute("UPDATE notifications SET parts_sent = ?2, updated_at = ?3 WHERE id = ?1", params![id, s, now()])?;
+                    tx.execute(
+                        "UPDATE notifications SET parts_sent = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![id, s, now()],
+                    )?;
                     Ok(())
                 })
                 .await?;
@@ -186,7 +194,9 @@ async fn deliver(db: &Db, sink: &dyn MessageSink, n: Claimed) -> Result<()> {
             let permanent = matches!(e, SendError::Permanent(_)) || n.attempts >= MAX_ATTEMPTS;
             let message = match &e {
                 SendError::RetryAfter(d) => format!("rate limited for {}s", d.as_secs()),
-                SendError::Transient(m) | SendError::Ambiguous(m) | SendError::Permanent(m) => m.clone(),
+                SendError::Transient(m) | SendError::Ambiguous(m) | SendError::Permanent(m) => {
+                    m.clone()
+                }
             };
             warn!(notification = %n.id, attempts = n.attempts, permanent, error = %message, "notification delivery failed");
             db.write(move |tx| {
@@ -206,7 +216,12 @@ async fn deliver(db: &Db, sink: &dyn MessageSink, n: Claimed) -> Result<()> {
 
 /// Delivers due notifications until `shutdown` fires. `wake` is notified when
 /// new rows are stored so delivery starts immediately.
-pub async fn run_worker(db: Db, sink: Arc<dyn MessageSink>, wake: Arc<Notify>, shutdown: CancellationToken) {
+pub async fn run_worker(
+    db: Db,
+    sink: Arc<dyn MessageSink>,
+    wake: Arc<Notify>,
+    shutdown: CancellationToken,
+) {
     loop {
         match claim(&db).await {
             Ok(Some(n)) => {
@@ -229,8 +244,13 @@ pub async fn run_worker(db: Db, sink: Arc<dyn MessageSink>, wake: Arc<Notify>, s
 /// Removes delivered and failed notifications older than `retention_secs`.
 pub async fn prune(db: &Db, retention_secs: u64) -> Result<usize> {
     let cutoff = now() - retention_secs as i64;
-    db.write(move |tx| Ok(tx.execute("DELETE FROM notifications WHERE state IN ('sent', 'failed') AND updated_at < ?1", [cutoff])?))
-        .await
+    db.write(move |tx| {
+        Ok(tx.execute(
+            "DELETE FROM notifications WHERE state IN ('sent', 'failed') AND updated_at < ?1",
+            [cutoff],
+        )?)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -247,11 +267,19 @@ pub mod tests {
 
     #[async_trait]
     impl MessageSink for RecordingSink {
-        async fn send_html(&self, chat_id: i64, thread_id: Option<i64>, html: &str) -> Result<(), SendError> {
+        async fn send_html(
+            &self,
+            chat_id: i64,
+            thread_id: Option<i64>,
+            html: &str,
+        ) -> Result<(), SendError> {
             if let Some(e) = self.fail_next.lock().unwrap().pop() {
                 return Err(e);
             }
-            self.sent.lock().unwrap().push((chat_id, thread_id, html.to_owned()));
+            self.sent
+                .lock()
+                .unwrap()
+                .push((chat_id, thread_id, html.to_owned()));
             Ok(())
         }
     }
@@ -273,9 +301,11 @@ pub mod tests {
     async fn state(db: &Db, id: &str) -> (String, i64, i64) {
         let id = id.to_owned();
         db.read(move |c| {
-            Ok(c.query_row("SELECT state, parts_sent, uncertain FROM notifications WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?)
+            Ok(c.query_row(
+                "SELECT state, parts_sent, uncertain FROM notifications WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
         })
         .await
         .unwrap()
@@ -284,25 +314,49 @@ pub mod tests {
     #[tokio::test]
     async fn dedupes_and_detects_conflicts() {
         let db = Db::open_in_memory().await.unwrap();
-        let Enqueued::Accepted(id) = enqueue(&db, sample(Some("e1"), "down")).await.unwrap() else { panic!() };
-        assert_eq!(enqueue(&db, sample(Some("e1"), "down")).await.unwrap(), Enqueued::Duplicate(id));
-        assert_eq!(enqueue(&db, sample(Some("e1"), "up")).await.unwrap(), Enqueued::Conflict);
-        assert!(matches!(enqueue(&db, sample(None, "x")).await.unwrap(), Enqueued::Accepted(_)));
+        let Enqueued::Accepted(id) = enqueue(&db, sample(Some("e1"), "down")).await.unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            enqueue(&db, sample(Some("e1"), "down")).await.unwrap(),
+            Enqueued::Duplicate(id)
+        );
+        assert_eq!(
+            enqueue(&db, sample(Some("e1"), "up")).await.unwrap(),
+            Enqueued::Conflict
+        );
+        assert!(matches!(
+            enqueue(&db, sample(None, "x")).await.unwrap(),
+            Enqueued::Accepted(_)
+        ));
     }
 
     #[tokio::test]
     async fn delivers_split_messages_and_resumes_after_failure() {
         let db = Db::open_in_memory().await.unwrap();
         let body = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
-        let Enqueued::Accepted(id) = enqueue(&db, sample(None, &body)).await.unwrap() else { panic!() };
+        let Enqueued::Accepted(id) = enqueue(&db, sample(None, &body)).await.unwrap() else {
+            panic!()
+        };
         let sink = RecordingSink::default();
         // The second part times out: the first part must not be resent.
         let first = claim(&db).await.unwrap().unwrap();
-        deliver(&db, &FailSecond { inner: &sink, calls: Mutex::new(0) }, first).await.unwrap();
+        deliver(
+            &db,
+            &FailSecond {
+                inner: &sink,
+                calls: Mutex::new(0),
+            },
+            first,
+        )
+        .await
+        .unwrap();
         assert_eq!(state(&db, &id).await, ("pending".into(), 1, 1));
         assert_eq!(sink.sent.lock().unwrap().len(), 1);
         // Make it due and retry.
-        db.write(|tx| Ok(tx.execute("UPDATE notifications SET next_attempt_at = 0", [])?)).await.unwrap();
+        db.write(|tx| Ok(tx.execute("UPDATE notifications SET next_attempt_at = 0", [])?))
+            .await
+            .unwrap();
         let again = claim(&db).await.unwrap().unwrap();
         deliver(&db, &sink, again).await.unwrap();
         assert_eq!(state(&db, &id).await.0, "sent");
@@ -319,7 +373,12 @@ pub mod tests {
 
     #[async_trait]
     impl MessageSink for FailSecond<'_> {
-        async fn send_html(&self, chat_id: i64, thread_id: Option<i64>, html: &str) -> Result<(), SendError> {
+        async fn send_html(
+            &self,
+            chat_id: i64,
+            thread_id: Option<i64>,
+            html: &str,
+        ) -> Result<(), SendError> {
             let n = {
                 let mut c = self.calls.lock().unwrap();
                 *c += 1;
@@ -335,9 +394,14 @@ pub mod tests {
     #[tokio::test]
     async fn permanent_errors_fail_without_retry() {
         let db = Db::open_in_memory().await.unwrap();
-        let Enqueued::Accepted(id) = enqueue(&db, sample(None, "x")).await.unwrap() else { panic!() };
+        let Enqueued::Accepted(id) = enqueue(&db, sample(None, "x")).await.unwrap() else {
+            panic!()
+        };
         let sink = RecordingSink::default();
-        sink.fail_next.lock().unwrap().push(SendError::Permanent("chat not found".into()));
+        sink.fail_next
+            .lock()
+            .unwrap()
+            .push(SendError::Permanent("chat not found".into()));
         let n = claim(&db).await.unwrap().unwrap();
         deliver(&db, &sink, n).await.unwrap();
         assert_eq!(state(&db, &id).await.0, "failed");
@@ -349,8 +413,13 @@ pub mod tests {
         let db = Db::open_in_memory().await.unwrap();
         enqueue(&db, sample(None, "x")).await.unwrap();
         claim(&db).await.unwrap().unwrap();
-        assert!(claim(&db).await.unwrap().is_none(), "leased row must not be claimed twice");
-        db.write(|tx| Ok(tx.execute("UPDATE notifications SET lease_until = 0", [])?)).await.unwrap();
+        assert!(
+            claim(&db).await.unwrap().is_none(),
+            "leased row must not be claimed twice"
+        );
+        db.write(|tx| Ok(tx.execute("UPDATE notifications SET lease_until = 0", [])?))
+            .await
+            .unwrap();
         assert!(claim(&db).await.unwrap().is_some());
     }
 }

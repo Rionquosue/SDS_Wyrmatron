@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use figment::providers::{Env, Format, Toml};
+use anyhow::{Context, Result, bail};
 use figment::Figment;
+use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -217,7 +217,12 @@ impl Default for FetchConfig {
             fxbsky_api: "https://api.fxbsky.app".into(),
             bsky_appview: "https://public.api.bsky.app".into(),
             plc_directory: "https://plc.directory".into(),
-            user_agent: concat!("Wyrmatron/", env!("CARGO_PKG_VERSION"), " (+https://github.com/Rionquosue)").into(),
+            user_agent: concat!(
+                "Wyrmatron/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/Rionquosue)"
+            )
+            .into(),
             max_redirects: 5,
             max_metadata_bytes: 2 * 1024 * 1024,
             connect_timeout_secs: 10,
@@ -306,7 +311,10 @@ impl Config {
             }
             for h in &c.key_sha256 {
                 if h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    bail!("consumer {} has a key hash that is not 64 hex characters", c.id);
+                    bail!(
+                        "consumer {} has a key hash that is not 64 hex characters",
+                        c.id
+                    );
                 }
             }
             for d in &c.destinations {
@@ -317,14 +325,19 @@ impl Config {
         }
         for (id, route) in &self.uptime_kuma {
             if !self.destinations.contains_key(&route.destination) {
-                bail!("Uptime Kuma route {id} references unknown destination {}", route.destination);
+                bail!(
+                    "Uptime Kuma route {id} references unknown destination {}",
+                    route.destination
+                );
             }
             if route.auth == KumaAuth::RouteSecret && route.secret_sha256.is_none() {
                 bail!("Uptime Kuma route {id} uses route_secret auth without secret_sha256");
             }
         }
         if self.server.worker_threads < 2 {
-            bail!("server.worker_threads must be at least 2 so blocking work cannot stall notifications");
+            bail!(
+                "server.worker_threads must be at least 2 so blocking work cannot stall notifications"
+            );
         }
         if !(1.0..=600.0).contains(&self.media.gif_max_seconds) {
             bail!("media.gif_max_seconds must be between 1 and 600");
@@ -335,7 +348,8 @@ impl Config {
 
 /// Reads a file-mounted secret, trimming trailing whitespace.
 pub fn read_secret(path: &Path) -> Result<SecretString> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading secret {}", path.display()))?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading secret {}", path.display()))?;
     let value = raw.trim_end().to_owned();
     if value.is_empty() {
         bail!("secret {} is empty", path.display());
@@ -351,7 +365,10 @@ mod tests {
     fn defaults_validate() {
         let c: Config = Figment::new().extract().unwrap();
         c.validate().unwrap();
-        assert_eq!(c.storage.database_path(), PathBuf::from("/data/wyrmatron.sqlite3"));
+        assert_eq!(
+            c.storage.database_path(),
+            PathBuf::from("/data/wyrmatron.sqlite3")
+        );
     }
 
     #[test]
@@ -368,12 +385,19 @@ mod tests {
             ))
             .extract()
             .unwrap();
-        assert!(c.validate().unwrap_err().to_string().contains("unknown destination"));
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown destination")
+        );
     }
 
     #[test]
     fn rejects_unknown_fields() {
-        let r: Result<Config, _> = Figment::new().merge(Toml::string("[server]\nlisten_typo = 1")).extract();
+        let r: Result<Config, _> = Figment::new()
+            .merge(Toml::string("[server]\nlisten_typo = 1"))
+            .extract();
         assert!(r.is_err());
     }
 }

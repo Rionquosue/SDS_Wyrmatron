@@ -11,10 +11,10 @@ use std::time::Duration;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{middleware, BoxError, Json, Router};
+use axum::{BoxError, Json, Router, middleware};
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Notify;
@@ -51,20 +51,35 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into(), field: None, retry_after: None }
+        Self {
+            status,
+            code,
+            message: message.into(),
+            field: None,
+            retry_after: None,
+        }
     }
     pub fn with_field(mut self, field: impl Into<String>) -> Self {
         self.field = Some(field.into());
         self
     }
     pub fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "invalid_authentication", "A valid bearer key is required.")
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_authentication",
+            "A valid bearer key is required.",
+        )
     }
     pub fn forbidden(message: &str) -> Self {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
     pub fn invalid(field: &str, message: &str) -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_parameter", message).with_field(field)
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_parameter",
+            message,
+        )
+        .with_field(field)
     }
     pub fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", "No such resource.")
@@ -73,13 +88,21 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, code, message)
     }
     pub fn unavailable(code: &'static str, retry_after: u64) -> Self {
-        let mut e = Self::new(StatusCode::SERVICE_UNAVAILABLE, code, "Temporarily unavailable; retry later.");
+        let mut e = Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            "Temporarily unavailable; retry later.",
+        );
         e.retry_after = Some(retry_after);
         e
     }
     pub fn internal(err: anyhow::Error) -> Self {
         tracing::error!(error = %err, "request failed");
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Internal error.")
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Internal error.",
+        )
     }
 }
 
@@ -100,10 +123,12 @@ impl IntoResponse for ApiError {
         }});
         let mut res = (self.status, Json(body)).into_response();
         if let Some(secs) = self.retry_after {
-            res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(secs));
+            res.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(secs));
         }
         if self.status == StatusCode::UNAUTHORIZED {
-            res.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+            res.headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
         res
     }
@@ -122,16 +147,26 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(Self(v)),
-            Err(JsonRejection::MissingJsonContentType(_)) => {
-                Err(ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_content_type", "Expected application/json."))
-            }
-            Err(JsonRejection::JsonDataError(e)) => {
-                Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_parameter", e.body_text()))
-            }
-            Err(JsonRejection::BytesRejection(_)) => {
-                Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", "Request body is too large."))
-            }
-            Err(e) => Err(ApiError::new(StatusCode::BAD_REQUEST, "malformed_request", e.body_text())),
+            Err(JsonRejection::MissingJsonContentType(_)) => Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_content_type",
+                "Expected application/json.",
+            )),
+            Err(JsonRejection::JsonDataError(e)) => Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_parameter",
+                e.body_text(),
+            )),
+            Err(JsonRejection::BytesRejection(_)) => Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+                "Request body is too large.",
+            )),
+            Err(e) => Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                e.body_text(),
+            )),
         }
     }
 }
@@ -159,7 +194,10 @@ async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> 
     if let Some(obj) = caps.as_object_mut() {
         obj.insert("api_version".into(), json!("1"));
         obj.insert("notifications".into(), json!({ "available": true }));
-        obj.insert("uptime_kuma_routes".into(), json!(state.config.uptime_kuma.len()));
+        obj.insert(
+            "uptime_kuma_routes".into(),
+            json!(state.config.uptime_kuma.len()),
+        );
     }
     Json(caps)
 }
@@ -180,13 +218,19 @@ pub fn router(state: AppState) -> Router {
     };
 
     let notify_routes = Router::new()
-        .route("/v1/notifications", post(notifications::submit).route_layer(authenticated.clone()))
+        .route(
+            "/v1/notifications",
+            post(notifications::submit).route_layer(authenticated.clone()),
+        )
         .route("/v1/hooks/uptime-kuma/{route_id}", post(kuma::hook))
         .layer(DefaultBodyLimit::max(cfg.json_body_limit))
         .layer(limit(cfg.notification_concurrency));
 
     let general = Router::new()
-        .route("/v1/capabilities", get(capabilities).route_layer(authenticated))
+        .route(
+            "/v1/capabilities",
+            get(capabilities).route_layer(authenticated),
+        )
         .layer(DefaultBodyLimit::max(cfg.json_body_limit));
 
     Router::new()
@@ -218,8 +262,20 @@ pub mod tests {
 
     pub async fn state() -> AppState {
         let mut config: Config = figment::Figment::new().extract().unwrap();
-        config.destinations.insert("ops".into(), Destination { chat_id: -100123, thread_id: Some(9) });
-        config.destinations.insert("personal".into(), Destination { chat_id: 42, thread_id: None });
+        config.destinations.insert(
+            "ops".into(),
+            Destination {
+                chat_id: -100123,
+                thread_id: Some(9),
+            },
+        );
+        config.destinations.insert(
+            "personal".into(),
+            Destination {
+                chat_id: 42,
+                thread_id: None,
+            },
+        );
         config.consumers = vec![
             ConsumerConfig {
                 id: "kuma".into(),
@@ -283,17 +339,29 @@ pub mod tests {
             }
             None => Body::empty(),
         };
-        let res = router(state.clone()).oneshot(req.body(body).unwrap()).await.unwrap();
+        let res = router(state.clone())
+            .oneshot(req.body(body).unwrap())
+            .await
+            .unwrap();
         let status = res.status();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     #[tokio::test]
     async fn health_and_auth() {
         let s = state().await;
-        assert_eq!(call(&s, "GET", "/health/live", None, None).await.0, StatusCode::OK);
-        assert_eq!(call(&s, "GET", "/health/ready", None, None).await.0, StatusCode::OK);
+        assert_eq!(
+            call(&s, "GET", "/health/live", None, None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&s, "GET", "/health/ready", None, None).await.0,
+            StatusCode::OK
+        );
         let (status, body) = call(&s, "GET", "/v1/capabilities", None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"]["code"], "invalid_authentication");

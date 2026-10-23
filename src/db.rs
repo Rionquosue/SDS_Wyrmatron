@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{M, Migrations};
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_initial.sql"))];
 
@@ -18,7 +18,10 @@ pub struct Db {
 
 /// Current UTC time as Unix seconds.
 pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 fn configure(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -96,7 +99,10 @@ impl Db {
     pub async fn get_kv(&self, key: &'static str) -> Result<Option<String>> {
         self.read(move |c| {
             use rusqlite::OptionalExtension;
-            Ok(c.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+            Ok(
+                c.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+                    .optional()?,
+            )
         })
         .await
     }
@@ -133,11 +139,19 @@ mod tests {
     async fn opens_and_round_trips_kv() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("test.sqlite3")).await.unwrap();
-        db.write(|tx| Ok(set_kv(tx, "offset", "42")?)).await.unwrap();
+        db.write(|tx| Ok(set_kv(tx, "offset", "42")?))
+            .await
+            .unwrap();
         assert_eq!(db.get_kv("offset").await.unwrap().as_deref(), Some("42"));
-        let mode: String = db.read(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?)).await.unwrap();
+        let mode: String = db
+            .read(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?))
+            .await
+            .unwrap();
         assert_eq!(mode, "wal");
-        let fk: i64 = db.read(|c| Ok(c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?)).await.unwrap();
+        let fk: i64 = db
+            .read(|c| Ok(c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?))
+            .await
+            .unwrap();
         assert_eq!(fk, 1);
         db.checkpoint().await.unwrap();
     }

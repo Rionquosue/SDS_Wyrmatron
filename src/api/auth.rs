@@ -25,7 +25,9 @@ impl Consumer {
         if self.scopes.contains(&scope) {
             Ok(())
         } else {
-            Err(ApiError::forbidden("This key does not have the required scope."))
+            Err(ApiError::forbidden(
+                "This key does not have the required scope.",
+            ))
         }
     }
 
@@ -33,7 +35,9 @@ impl Consumer {
         if self.destinations.iter().any(|d| d == name) {
             Ok(())
         } else {
-            Err(ApiError::forbidden("This key may not send to that destination."))
+            Err(ApiError::forbidden(
+                "This key may not send to that destination.",
+            ))
         }
     }
 }
@@ -50,7 +54,11 @@ impl Consumers {
     pub fn new(config: &[ConsumerConfig]) -> Self {
         let mut entries = Vec::new();
         for c in config {
-            let consumer = Arc::new(Consumer { id: c.id.clone(), scopes: c.scopes.clone(), destinations: c.destinations.clone() });
+            let consumer = Arc::new(Consumer {
+                id: c.id.clone(),
+                scopes: c.scopes.clone(),
+                destinations: c.destinations.clone(),
+            });
             for h in &c.key_sha256 {
                 let mut hash = [0u8; 32];
                 // Config validation guarantees 64 hex characters.
@@ -79,19 +87,29 @@ impl Consumers {
 /// Matches a secret route ID against its stored hash in constant time.
 pub fn secret_matches(presented: &str, sha256_hex: &str) -> bool {
     let mut expected = [0u8; 32];
-    hex::decode_to_slice(sha256_hex, &mut expected).is_ok() && bool::from(sha256(presented.as_bytes()).ct_eq(&expected))
+    hex::decode_to_slice(sha256_hex, &mut expected).is_ok()
+        && bool::from(sha256(presented.as_bytes()).ct_eq(&expected))
 }
 
 pub fn bearer(req: &Request) -> Option<&str> {
     let value = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then(|| token.trim()).filter(|t| !t.is_empty())
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|t| !t.is_empty())
 }
 
 /// Middleware: requires a valid consumer key and stores the consumer in the
 /// request extensions.
-pub async fn require_consumer(State(state): State<AppState>, mut req: Request, next: Next) -> Result<Response, ApiError> {
-    let consumer = bearer(&req).and_then(|k| state.consumers.authenticate(k)).ok_or_else(ApiError::unauthorized)?;
+pub async fn require_consumer(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let consumer = bearer(&req)
+        .and_then(|k| state.consumers.authenticate(k))
+        .ok_or_else(ApiError::unauthorized)?;
     req.extensions_mut().insert(consumer);
     Ok(next.run(req).await)
 }
