@@ -47,10 +47,19 @@ Source map: `src/api` (HTTP API), `src/telegram` (Bot API client, polling, comma
    sudo chown 10001:10001 secrets/*
    sudo chmod 0400 secrets/*
    ```
-5. **Configuration.** Copy `config.example.toml` to `config.toml`. Set at least:
-   - `telegram.allowed_users` and `telegram.admins`: numeric IDs.
+5. **Configuration directory.** `./config` is mounted at `/etc/wyrmatron`. It holds `config.toml` (mounted read-only), `whitelist.cfg` and `blocklist.cfg`:
+   ```sh
+   mkdir -p config
+   cp config.example.toml config/config.toml
+   cp whitelist.example.cfg config/whitelist.cfg
+   sudo chown -R 10001:10001 config      # the bot writes blocklist.cfg here
+   ```
+   In `config.toml`, set at least:
+   - `telegram.admins`: numeric IDs; admins are always allowed.
    - `destinations`.
    - API `consumers`: store only `key_sha256` from `wyrmatron gen-key`.
+
+   Put every other account allowed to use the bot in `whitelist.cfg` (see [Account access](#account-access)).
 6. **Start:**
    ```sh
    cp .env.example .env
@@ -75,8 +84,28 @@ The container runs as UID 10001 with a read-only root filesystem, no capabilitie
 - **Sources:** reply to a video with a command, or put a link after it. Use `video=N` to choose one video from a post that has several.
 - **Private chats:** a bare video or supported link gets action buttons. Buttons are bound to you, the chat and the message, expire after 15 minutes, and work once.
 - **Groups:** with privacy mode on (the default), use commands, including `/gif@YourBot`. The bot does not react to plain links.
-- **Authorization:** by numeric user and chat IDs only. Groups must be listed in `allowed_chats`.
+- **Authorization:** by account whitelist (below) and, for groups, `allowed_chats`. Numeric IDs only.
 - **Telegram limits:** the hosted Bot API downloads files up to 20 MB and uploads up to 50 MB. For larger files, run a Local Bot API server and set `telegram.api_base` and the size limits.
+
+## Account access
+
+Every Telegram account is screened against the whitelist **before the bot replies or does anything**.
+
+- **Whitelist:** `config/whitelist.cfg` (in the container, `/etc/wyrmatron/whitelist.cfg`) has one numeric user ID per line. Text after `#` is a comment. Admins from `config.toml` are always allowed. If the file is missing, the bot creates an empty one with instructions.
+- **Blocking:** any other account that sends the bot a private message, sends it a command in a group, or presses one of its buttons is appended to `config/blocklist.cfg` and ignored from then on:
+  ```
+  987654321	# @someone blocked 2026-10-23T07:00:00Z (private chat)
+  ```
+  The bot sends no reply and doesn't even acknowledge the button press. Telegram has no Bot API method for a bot to block a user, so a block means the bot never responds; it does not remove anyone from groups.
+- **Group chatter:** ordinary messages in a group that aren't addressed to the bot are not screened, so members of an allowed group are not blocklisted just for talking.
+- **Edits apply without a restart.** Both files are re-read when they change on the host:
+  - Delete a line from `blocklist.cfg` to unblock an account.
+  - Add an ID to `whitelist.cfg` to allow it. The whitelist wins over an older blocklist entry.
+  - Remove an ID from the whitelist to block that account on its next contact.
+- **Finding someone's ID:** have them message the bot. They are blocklisted with their username, and you can move that line into the whitelist.
+- **Other locations:** set `telegram.whitelist_file` and `telegram.blocklist_file` to keep the files elsewhere.
+
+If the whitelist is empty and no admins are configured, every account is blocked, and the bot logs a warning at startup.
 
 ## Uptime Kuma
 
@@ -141,12 +170,12 @@ The image cross-compiles on the build platform with `cargo-zigbuild` (no emulati
 
 Verified in the development environment (Rust 1.97.0):
 
-- 75 tests pass, covering:
+- 84 tests pass, covering:
   - configuration, the migrations and SQLite pragmas;
   - consumer authentication, notifications and the Kuma adapter (JSON, form-data, dedup, suppression, secret routes);
   - the outbox (split messages, resumption, permanent failures, lease recovery);
   - the Telegram client (token never in errors, 429 mapping, download limits, rate limiting);
-  - command parsing, authorization, button binding and expiry, and group privacy behaviour;
+  - command parsing, the account whitelist and blocklist (no replies to unknown accounts, persistence, host edits without restart, admin override, group chatter), button binding and expiry, and group privacy behaviour;
   - the FFmpeg client against a mock service (submission format, polling, async and sync errors, lost jobs, 503 back-off, integrity failures, Range resume, restart cleanup);
   - the planner for every preset on service 0.1.0 and 0.2.0 capabilities;
   - the restricted fetch client (address classes, URL checks, redirect limits, size limits);

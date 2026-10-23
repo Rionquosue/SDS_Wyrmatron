@@ -1,5 +1,5 @@
-# Wyrmatron configuration. Copy to config.toml and mount it read-only at
-# /etc/wyrmatron/config.toml. Any value can be overridden with an environment
+# Wyrmatron configuration. Copy to config/config.toml; the config directory is
+# mounted at /etc/wyrmatron and also holds whitelist.cfg and blocklist.cfg. Any value can be overridden with an environment
 # variable: WYRMATRON_<SECTION>__<KEY>, for example WYRMATRON_TELEGRAM__ENABLED=false.
 # Unknown keys are rejected.
 
@@ -22,12 +22,17 @@ metadata_retention_secs = 604800
 [telegram]
 enabled = true
 token_file = "/run/secrets/telegram_token"
-# Numeric IDs only: usernames can change. Ask @userinfobot or check the bot's
-# logs for IDs.
-allowed_users = [123456789]
+# Accounts are screened against whitelist.cfg (one numeric user ID per line)
+# before the bot replies or runs anything. Any other account that messages the
+# bot, sends it a command or presses its buttons is appended to blocklist.cfg
+# and ignored from then on. Both files live next to this one by default and
+# are re-read when edited; delete a blocklist line to unblock someone.
+# whitelist_file = "/etc/wyrmatron/whitelist.cfg"
+# blocklist_file = "/etc/wyrmatron/blocklist.cfg"
 # Group or supergroup chat IDs where commands are accepted (negative numbers).
 allowed_chats = []
-# Admins may see and cancel any job.
+# Admins are always whitelisted and may see and cancel any job. Numeric IDs
+# only: usernames can change.
 admins = [123456789]
 # For a Local Bot API server, point this at it and raise the size limits.
 # api_base = "https://api.telegram.org"

@@ -22,7 +22,11 @@ services:
       # Database, WAL and SHM files must live together on local storage (not NFS/SMB).
       - ${BOT_DATA_DIR:-wyrmatron-data}:/data
       - ${BOT_WORK_DIR:-wyrmatron-work}:/work
-      - ${BOT_CONFIG:-./config.toml}:/etc/wyrmatron/config.toml:ro
+      # The config directory is writable so the bot can maintain blocklist.cfg;
+      # config.toml itself is mounted read-only on top. whitelist.cfg and
+      # blocklist.cfg can be edited on the host while the bot runs.
+      - ${BOT_CONFIG_DIR:-./config}:/etc/wyrmatron
+      - ${BOT_CONFIG_DIR:-./config}/config.toml:/etc/wyrmatron/config.toml:ro
     secrets:
       - telegram_token
       - ffmpeg_key

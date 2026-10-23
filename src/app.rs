@@ -20,6 +20,7 @@ use crate::fetch::Fetcher;
 use crate::ffmpeg::FfmpegClient;
 use crate::media::service::MediaService;
 use crate::notify::{self, MessageSink, SendError};
+use crate::telegram::access::AccessList;
 use crate::telegram::client::Bot;
 use crate::telegram::handler::Handler;
 use crate::{media, telegram};
@@ -204,12 +205,34 @@ async fn run(config: Config) -> Result<()> {
                 }
             }
         };
+        let access = Arc::new(AccessList::new(
+            config.whitelist_path(),
+            config.blocklist_path(),
+            &config.telegram.admins,
+        ));
+        match access.ensure_whitelist() {
+            Ok(true) => {
+                info!(path = %access.whitelist_path().display(), "created an empty account whitelist")
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(path = %access.whitelist_path().display(), error = %e, "cannot create the account whitelist")
+            }
+        }
+        let (whitelisted, blocked) = access.counts();
+        info!(whitelisted, blocked, blocklist = %access.blocklist_path().display(), "account access lists loaded");
+        if whitelisted == 0 {
+            warn!(
+                "the account whitelist is empty and there are no admins: every account will be blocked"
+            );
+        }
         let handler = Arc::new(Handler {
             bot: bot.clone(),
             db: db.clone(),
             config: config.clone(),
             username,
             media: media.clone(),
+            access,
         });
         let inbox = Arc::new(Notify::new());
         let poll = Duration::from_secs(config.telegram.poll_timeout_secs);

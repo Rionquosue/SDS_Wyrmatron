@@ -9,9 +9,12 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use super::access::{AccessList, Verdict};
 use super::client::{Bot, TgError};
 use super::commands::{arg_url, find_urls, parse_command};
-use super::types::{CallbackQuery, Chat, FileRef, InlineButton, InlineKeyboard, Message, Update};
+use super::types::{
+    CallbackQuery, Chat, FileRef, InlineButton, InlineKeyboard, Message, Update, User,
+};
 use crate::config::Config;
 use crate::db::{Db, now};
 use crate::media::spec::{Action, JobOptions, parse_args};
@@ -72,6 +75,7 @@ pub struct Handler {
     pub config: Arc<Config>,
     pub username: String,
     pub media: Arc<dyn MediaJobs>,
+    pub access: Arc<AccessList>,
 }
 
 const FILE_ACTIONS: [Action; 4] = [Action::Gif, Action::Mute, Action::Compress, Action::Mp4];
@@ -104,10 +108,21 @@ impl Handler {
     }
 
     /// Numeric IDs only; usernames are mutable (SDS §10).
-    fn authorized(&self, user: i64, chat: &Chat) -> bool {
-        let t = &self.config.telegram;
-        let user_ok = t.allowed_users.contains(&user) || t.admins.contains(&user);
-        user_ok && (chat.is_private() || t.allowed_chats.contains(&chat.id))
+    fn chat_allowed(&self, chat: &Chat) -> bool {
+        chat.is_private() || self.config.telegram.allowed_chats.contains(&chat.id)
+    }
+
+    /// Screens the account before the bot does anything: non-whitelisted
+    /// accounts are blocklisted and get no response at all.
+    fn admitted(&self, user: &User, context: &str) -> bool {
+        match self.access.check(user, context) {
+            Verdict::Allowed => true,
+            Verdict::Blocked => {
+                debug!(user = user.id, context, "ignoring a blocked account");
+                false
+            }
+            Verdict::NewlyBlocked => false,
+        }
     }
 
     pub async fn handle(&self, update: Update) -> Result<()> {
@@ -135,15 +150,20 @@ impl Handler {
         }
         let (text, entities) = m.content();
         let command = parse_command(text, entities, &self.username);
-        if !self.authorized(from.id, &m.chat) {
-            if command.is_some() && m.chat.is_private() {
-                self.reply(&m, "You are not authorized to use this bot.")
-                    .await?;
-            }
+        // Interactions are private messages and commands addressed to the
+        // bot; other group chatter is not screened (or answered).
+        let context = match (&command, m.chat.is_private()) {
+            (_, true) => "private chat".to_owned(),
+            (Some(c), false) => format!("chat {} command /{}", m.chat.id, c.name),
+            (None, false) => return Ok(()),
+        };
+        if !self.admitted(&from, &context) {
+            return Ok(());
+        }
+        if !self.chat_allowed(&m.chat) {
             debug!(
-                user = from.id,
                 chat = m.chat.id,
-                "ignoring message from unauthorized user or chat"
+                "ignoring a command in a chat that is not allowed"
             );
             return Ok(());
         }
@@ -425,6 +445,11 @@ impl Handler {
     }
 
     async fn on_callback(&self, q: CallbackQuery) -> Result<()> {
+        // Screened before the press is even acknowledged.
+        let chat = q.message.as_ref().map(|m| m.chat.id).unwrap_or_default();
+        if !self.admitted(&q.from, &format!("button in chat {chat}")) {
+            return Ok(());
+        }
         let (Some(data), Some(msg)) = (q.data.as_deref(), q.message.as_ref()) else {
             self.bot.answer_callback(&q.id, None).await?;
             return Ok(());
@@ -474,10 +499,8 @@ impl Handler {
                 .await?;
             return Ok(());
         };
-        if !self.authorized(user, &msg.chat) {
-            self.bot
-                .answer_callback(&q.id, Some("You are not authorized to use this bot."))
-                .await?;
+        if !self.chat_allowed(&msg.chat) {
+            self.bot.answer_callback(&q.id, None).await?;
             return Ok(());
         }
         // Consume every button on the prompt.
@@ -598,8 +621,15 @@ mod tests {
 
     async fn handler(server: &MockServer, media: Arc<FakeMedia>) -> Handler {
         let mut config: Config = figment::Figment::new().extract().unwrap();
-        config.telegram.allowed_users = vec![42];
         config.telegram.allowed_chats = vec![-1001];
+        // Each handler gets its own config directory with 42 whitelisted.
+        config.config_dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(config.whitelist_path(), "42 # tester\n").unwrap();
+        let access = Arc::new(AccessList::new(
+            config.whitelist_path(),
+            config.blocklist_path(),
+            &config.telegram.admins,
+        ));
         Handler {
             bot: Arc::new(Bot::new(
                 crate::http::client(),
@@ -610,7 +640,14 @@ mod tests {
             config: Arc::new(config),
             username: "wyrmbot".into(),
             media,
+            access,
         }
+    }
+
+    fn blocklisted(h: &Handler) -> std::collections::HashSet<i64> {
+        std::fs::read_to_string(h.config.blocklist_path())
+            .map(|t| super::super::access::parse_ids(&t))
+            .unwrap_or_default()
     }
 
     fn message(chat: i64, kind: &str, user: i64, text: &str) -> Message {
@@ -707,7 +744,7 @@ mod tests {
         let server = telegram().await;
         let media = Arc::new(FakeMedia::default());
         let h = handler(&server, media.clone()).await;
-        // Unknown user in private chat: told once; in a group: silent.
+        // Unknown accounts get no reply anywhere and are blocklisted.
         h.handle(Update {
             update_id: 1,
             message: Some(message(7, "private", 7, "/gif https://x.com/a/status/1")),
@@ -736,14 +773,26 @@ mod tests {
         .await
         .unwrap();
         assert!(media.submitted.lock().unwrap().is_empty());
-        let replies = sent(&server, "sendMessage").await;
-        assert_eq!(replies.len(), 1);
         assert!(
-            replies[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("not authorized")
+            sent(&server, "sendMessage").await.is_empty(),
+            "no replies at all"
         );
+        assert_eq!(blocklisted(&h), std::collections::HashSet::from([7]));
+        let entry = std::fs::read_to_string(h.config.blocklist_path()).unwrap();
+        assert_eq!(
+            entry.lines().filter(|l| l.starts_with("7\t")).count(),
+            1,
+            "blocked once"
+        );
+        // A blocked account stays ignored, even with a valid command.
+        h.handle(Update {
+            update_id: 5,
+            message: Some(message(7, "private", 7, "/help")),
+            callback_query: None,
+        })
+        .await
+        .unwrap();
+        assert!(sent(&server, "sendMessage").await.is_empty());
         // 25 MB file exceeds the hosted getFile limit.
         let mut m = message(42, "private", 42, "/mp4");
         m.video = Some(
@@ -841,7 +890,12 @@ mod tests {
             "a token works once"
         );
         let answers = sent(&server, "answerCallbackQuery").await;
-        assert_eq!(answers.len(), 4, "every callback is answered");
+        assert_eq!(
+            answers.len(),
+            3,
+            "whitelisted presses are answered; 43 is ignored"
+        );
+        assert_eq!(blocklisted(&h), std::collections::HashSet::from([43]));
     }
 
     #[tokio::test]
@@ -860,5 +914,63 @@ mod tests {
         .await
         .unwrap();
         assert!(sent(&server, "sendMessage").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_chatter_is_not_screened_but_commands_are() {
+        let server = telegram().await;
+        let h = handler(&server, Arc::new(FakeMedia::default())).await;
+        // Plain messages from strangers in an allowed group are not interactions.
+        h.handle(Update {
+            update_id: 1,
+            message: Some(message(-1001, "supergroup", 8, "hello everyone")),
+            callback_query: None,
+        })
+        .await
+        .unwrap();
+        assert!(blocklisted(&h).is_empty());
+        // A command addressed to the bot is.
+        h.handle(Update {
+            update_id: 2,
+            message: Some(message(-1001, "supergroup", 8, "/help")),
+            callback_query: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(blocklisted(&h), std::collections::HashSet::from([8]));
+        assert!(sent(&server, "sendMessage").await.is_empty());
+        // Whitelisting on the host takes effect without a restart.
+        std::fs::write(h.config.whitelist_path(), "42\n8\n").unwrap();
+        h.handle(Update {
+            update_id: 3,
+            message: Some(message(-1001, "supergroup", 8, "/help")),
+            callback_query: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent(&server, "sendMessage").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admins_are_always_allowed() {
+        let server = telegram().await;
+        let mut h = handler(&server, Arc::new(FakeMedia::default())).await;
+        let mut config = (*h.config).clone();
+        config.telegram.admins = vec![99];
+        h.access = Arc::new(AccessList::new(
+            config.whitelist_path(),
+            config.blocklist_path(),
+            &config.telegram.admins,
+        ));
+        h.config = Arc::new(config);
+        h.handle(Update {
+            update_id: 1,
+            message: Some(message(99, "private", 99, "/help")),
+            callback_query: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent(&server, "sendMessage").await.len(), 1);
+        assert!(blocklisted(&h).is_empty());
     }
 }

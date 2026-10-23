@@ -32,12 +32,17 @@ destinations = ["ops"]
 destination = "ops"
 CONF
 chmod 0644 "$scratch/config.toml"
+mkdir -p "$scratch/config"
+mv "$scratch/config.toml" "$scratch/config/config.toml"
+# The container user must be able to write the access lists.
+chmod 0777 "$scratch/config"
 
 start() {
   docker run -d --name "$name" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --pids-limit 64 --memory 256m --cpus 0.5 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700 \
-    -v "$volume:/data" -v "$scratch/config.toml:/etc/wyrmatron/config.toml:ro" \
+    -v "$volume:/data" -v "$scratch/config:/etc/wyrmatron" \
+    -v "$scratch/config/config.toml:/etc/wyrmatron/config.toml:ro" \
     -p 127.0.0.1::8080 "$image" >/dev/null
   for _ in $(seq 1 30); do
     if docker exec "$name" /usr/local/bin/wyrmatron healthcheck; then return 0; fi

@@ -2,3 +2,4 @@
 *.sqlite3*
 /secrets/
 config.local.toml
+/config/

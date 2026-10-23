@@ -16,6 +16,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/wyrmatron/config.toml";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Directory of the configuration file; access lists live here.
+    #[serde(skip, default = "default_config_dir")]
+    pub config_dir: PathBuf,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -110,11 +113,15 @@ pub struct TelegramConfig {
     pub api_base: String,
     pub token_file: PathBuf,
     pub poll_timeout_secs: u64,
-    /// Numeric user IDs allowed to use media commands.
-    pub allowed_users: Vec<i64>,
+    /// Account whitelist file (one user ID per line). Defaults to
+    /// `whitelist.cfg` in the config directory.
+    pub whitelist_file: Option<PathBuf>,
+    /// Where non-whitelisted accounts are recorded. Defaults to
+    /// `blocklist.cfg` in the config directory.
+    pub blocklist_file: Option<PathBuf>,
     /// Group or channel chat IDs where commands are accepted.
     pub allowed_chats: Vec<i64>,
-    /// Users who may act on any job (status/cancel).
+    /// Users who may act on any job (status/cancel). Always whitelisted.
     pub admins: Vec<i64>,
     /// Lifetime of inline action buttons.
     pub button_ttl_secs: u64,
@@ -131,7 +138,8 @@ impl Default for TelegramConfig {
             api_base: "https://api.telegram.org".into(),
             token_file: PathBuf::from("/run/secrets/telegram_token"),
             poll_timeout_secs: 50,
-            allowed_users: Vec::new(),
+            whitelist_file: None,
+            blocklist_file: None,
             allowed_chats: Vec::new(),
             admins: Vec::new(),
             button_ttl_secs: 900,
@@ -282,6 +290,10 @@ pub struct KumaRoute {
     pub suppress_maintenance: bool,
 }
 
+fn default_config_dir() -> PathBuf {
+    PathBuf::from("/etc/wyrmatron")
+}
+
 fn yes() -> bool {
     true
 }
@@ -296,7 +308,7 @@ impl Config {
         if path.exists() {
             figment = figment.merge(Toml::file(&path));
         }
-        let config: Config = figment
+        let mut config: Config = figment
             .merge(
                 Env::prefixed("WYRMATRON_")
                     .ignore(&["config", "log_format"])
@@ -304,8 +316,25 @@ impl Config {
             )
             .extract()
             .with_context(|| format!("reading configuration from {}", path.display()))?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            config.config_dir = dir.to_path_buf();
+        }
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn whitelist_path(&self) -> PathBuf {
+        self.telegram
+            .whitelist_file
+            .clone()
+            .unwrap_or_else(|| self.config_dir.join("whitelist.cfg"))
+    }
+
+    pub fn blocklist_path(&self) -> PathBuf {
+        self.telegram
+            .blocklist_file
+            .clone()
+            .unwrap_or_else(|| self.config_dir.join("blocklist.cfg"))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -394,6 +423,24 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unknown destination")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn access_lists_live_next_to_the_config_file() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "[telegram]\nadmins = [1]\n")?;
+            let path = jail.directory().join("config.toml");
+            let c = Config::load(Some(&path)).map_err(|e| e.to_string())?;
+            assert_eq!(c.whitelist_path(), jail.directory().join("whitelist.cfg"));
+            assert_eq!(c.blocklist_path(), jail.directory().join("blocklist.cfg"));
+            Ok(())
+        });
+        let c: Config = Figment::new().extract().unwrap();
+        assert_eq!(
+            c.blocklist_path(),
+            PathBuf::from("/etc/wyrmatron/blocklist.cfg")
         );
     }
 

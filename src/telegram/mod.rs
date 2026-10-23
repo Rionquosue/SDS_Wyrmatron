@@ -1,6 +1,7 @@
 //! Telegram long polling. Updates are written to an inbox in the same
 //! transaction that advances the offset, then processed in order (SDS §4).
 
+pub mod access;
 pub mod client;
 pub mod commands;
 pub mod handler;

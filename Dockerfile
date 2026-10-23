@@ -34,8 +34,9 @@ RUN apk add --no-cache ca-certificates \
  && addgroup -g 10001 wyrmatron \
  && adduser -D -H -u 10001 -G wyrmatron wyrmatron \
  && mkdir -p /data /work /etc/wyrmatron \
- # New named volumes inherit this ownership.
- && chown wyrmatron:wyrmatron /data /work
+ # New named volumes inherit this ownership; /etc/wyrmatron holds the
+ # access lists the bot writes.
+ && chown wyrmatron:wyrmatron /data /work /etc/wyrmatron
 COPY --from=build /out/wyrmatron /usr/local/bin/wyrmatron
 USER 10001:10001
 ENV WYRMATRON_CONFIG=/etc/wyrmatron/config.toml
