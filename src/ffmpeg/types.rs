@@ -68,6 +68,8 @@ impl Capabilities {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioMode {
+    /// The service default; sent only when a request states it explicitly.
+    #[allow(dead_code)]
     Preserve,
     Remove,
 }

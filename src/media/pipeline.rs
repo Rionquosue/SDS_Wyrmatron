@@ -6,19 +6,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use url::Url;
 
 use super::jobs::{self, Finished, JobRow, SourceKind};
-use super::plan::{plan, Delivery, Rung};
-use super::service::{human_bytes, MediaService};
+use super::plan::{Delivery, Rung, plan};
+use super::service::{MediaService, human_bytes};
 use super::spec::Action;
 use crate::db::now;
 use crate::extract::{choose_candidate, parse_link, select};
 use crate::fetch::HostPolicy;
-use crate::ffmpeg::types::{thumbnail_box, MediaInfo, Operation};
+use crate::ffmpeg::types::{MediaInfo, Operation, thumbnail_box};
 use crate::ffmpeg::{Attempt, FfError, Input};
 use crate::telegram::client::{MediaKind, MediaUpload, TgError};
 use crate::telegram::handler::TelegramSource;
@@ -37,7 +37,11 @@ pub struct JobFailure {
 
 impl JobFailure {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), retry_in: None }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retry_in: None,
+        }
     }
 }
 
@@ -58,9 +62,15 @@ impl From<anyhow::Error> for JobFailure {
 fn from_ff(e: FfError) -> JobFailure {
     let message = match &e {
         FfError::Failed { code, .. } | FfError::Rejected { code, .. } => match code.as_str() {
-            "invalid_media" | "unsupported_media" => "That file could not be read, or its format is not supported.".to_owned(),
-            "duration_exceeded" => "That video is longer than the encoder allows. Try clipping it.".to_owned(),
-            "dimensions_exceeded" => "That video's resolution is too large for the encoder.".to_owned(),
+            "invalid_media" | "unsupported_media" => {
+                "That file could not be read, or its format is not supported.".to_owned()
+            }
+            "duration_exceeded" => {
+                "That video is longer than the encoder allows. Try clipping it.".to_owned()
+            }
+            "dimensions_exceeded" => {
+                "That video's resolution is too large for the encoder.".to_owned()
+            }
             "range_out_of_bounds" => "The clip extends past the end of the video.".to_owned(),
             "output_too_large" => "The result was too large. Try a smaller preset.".to_owned(),
             "upload_too_large" => "That file is larger than the encoder accepts.".to_owned(),
@@ -85,14 +95,23 @@ pub async fn run_worker(svc: Arc<MediaService>, name: String, shutdown: Cancella
             Ok(Some(job)) => {
                 let id = job.id.clone();
                 let token = shutdown.child_token();
-                svc.running.lock().expect("running lock").insert(id.clone(), token.clone());
+                svc.running
+                    .lock()
+                    .expect("running lock")
+                    .insert(id.clone(), token.clone());
                 let (s, t) = (svc.clone(), token.clone());
                 // A separate task, so a panic fails only this job.
                 let outcome = tokio::spawn(async move { process(&s, job, &t).await }).await;
                 svc.running.lock().expect("running lock").remove(&id);
                 if let Err(e) = outcome {
                     error!(job = %id, error = %e, "media job panicked");
-                    let _ = jobs::fail(&svc.db, &id, "internal_error", "An internal error occurred.").await;
+                    let _ = jobs::fail(
+                        &svc.db,
+                        &id,
+                        "internal_error",
+                        "An internal error occurred.",
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -120,7 +139,11 @@ async fn process(svc: &MediaService, job: JobRow, cancel: &CancellationToken) {
             }
         })
     };
-    let result = if job.cancel_requested { Err(JobFailure::new("cancelled", "Cancelled.")) } else { run(svc, &job, cancel).await };
+    let result = if job.cancel_requested {
+        Err(JobFailure::new("cancelled", "Cancelled."))
+    } else {
+        run(svc, &job, cancel).await
+    };
     heartbeat.abort();
     match result {
         Ok(()) => info!(job = %job.id, action = %job.action, "media job completed"),
@@ -141,7 +164,11 @@ async fn process(svc: &MediaService, job: JobRow, cancel: &CancellationToken) {
             let _ = tokio::fs::remove_dir_all(svc.job_dir(&job.id)).await;
             status(svc, &job, "🚫 Cancelled.").await;
         }
-        Err(JobFailure { retry_in: Some(secs), message, .. }) => {
+        Err(JobFailure {
+            retry_in: Some(secs),
+            message,
+            ..
+        }) => {
             let _ = jobs::defer(&svc.db, &job.id, secs, &message).await;
         }
         Err(f) => {
@@ -156,14 +183,24 @@ async fn process(svc: &MediaService, job: JobRow, cancel: &CancellationToken) {
 /// Best-effort progress edit of the Telegram status message.
 async fn status(svc: &MediaService, job: &JobRow, html: &str) {
     if let (Some(bot), Some(chat), Some(msg)) = (&svc.bot, job.chat_id, job.status_message) {
-        let text = format!("{html}\n<i>{} · job <code>{}</code></i>", job.action.label(), job.id);
+        let text = format!(
+            "{html}\n<i>{} · job <code>{}</code></i>",
+            job.action.label(),
+            job.id
+        );
         if let Err(e) = bot.edit_message(chat, msg, &text, None).await {
             warn!(job = %job.id, error = %e, "status update failed");
         }
     }
 }
 
-async fn stage(svc: &MediaService, job: &JobRow, state: &'static str, html: &str, cancel: &CancellationToken) -> Result<(), JobFailure> {
+async fn stage(
+    svc: &MediaService,
+    job: &JobRow,
+    state: &'static str,
+    html: &str,
+    cancel: &CancellationToken,
+) -> Result<(), JobFailure> {
     if cancel.is_cancelled() {
         return Err(JobFailure::new("cancelled", "Cancelled."));
     }
@@ -177,47 +214,86 @@ struct Source {
     attribution: Option<(Option<String>, String)>,
 }
 
-async fn run(svc: &MediaService, job: &JobRow, cancel: &CancellationToken) -> Result<(), JobFailure> {
+async fn run(
+    svc: &MediaService,
+    job: &JobRow,
+    cancel: &CancellationToken,
+) -> Result<(), JobFailure> {
     let dir = svc.job_dir(&job.id);
     tokio::fs::create_dir_all(&dir).await?;
     let source = obtain_source(svc, job, &dir, cancel).await?;
-    jobs::set_source(&svc.db, &job.id, &source.input.path.to_string_lossy(), source.input.size as i64).await?;
+    jobs::set_source(
+        &svc.db,
+        &job.id,
+        &source.input.path.to_string_lossy(),
+        source.input.size as i64,
+    )
+    .await?;
 
     let need_ffmpeg = job.action != Action::Fetch;
     let client = svc.ffmpeg.clone();
-    if need_ffmpeg {
-        if let Some(why) = svc.unavailable_reason(job.action) {
-            return Err(JobFailure::new("media_unavailable", format!("/{} is unavailable: {why}.", job.action)));
-        }
+    if need_ffmpeg && let Some(why) = svc.unavailable_reason(job.action) {
+        return Err(JobFailure::new(
+            "media_unavailable",
+            format!("/{} is unavailable: {why}.", job.action),
+        ));
     }
     stage(svc, job, "processing", "⚙️ Processing…", cancel).await?;
     // Metadata is required for processing and optional for fetch.
     let info = match &client {
-        Some(c) if need_ffmpeg || c.capabilities().is_some() => match metadata(svc, job, &source.input, cancel).await {
-            Ok(i) => Some(i),
-            Err(e) if need_ffmpeg => return Err(e),
-            Err(e) => {
-                warn!(job = %job.id, error = %e.message, "metadata unavailable for fetch");
-                None
+        Some(c) if need_ffmpeg || c.capabilities().is_some() => {
+            match metadata(svc, job, &source.input, cancel).await {
+                Ok(i) => Some(i),
+                Err(e) if need_ffmpeg => return Err(e),
+                Err(e) => {
+                    warn!(job = %job.id, error = %e.message, "metadata unavailable for fetch");
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
-    if let (Some(info), Some(max)) = (&info, client.as_ref().and_then(|c| c.capabilities()).and_then(|c| c.limit("max_duration_seconds"))) {
-        if need_ffmpeg && info.duration_seconds > max as f64 && !job.options.is_clip() {
-            return Err(JobFailure::new("duration_exceeded", format!("That video is over {max} seconds. Add start= and duration= to clip it.")));
-        }
+    if let (Some(info), Some(max)) = (
+        &info,
+        client
+            .as_ref()
+            .and_then(|c| c.capabilities())
+            .and_then(|c| c.limit("max_duration_seconds")),
+    ) && need_ffmpeg
+        && info.duration_seconds > max as f64
+        && !job.options.is_clip()
+    {
+        return Err(JobFailure::new(
+            "duration_exceeded",
+            format!("That video is over {max} seconds. Add start= and duration= to clip it."),
+        ));
     }
 
     let (result_path, delivery, dims, duration) = if job.action == Action::Fetch {
-        let mp4 = info.as_ref().is_some_and(|i| i.format.contains("mp4") && i.video_codec.as_deref() == Some("h264"));
-        let delivery = if mp4 { Delivery::Video } else { Delivery::Document };
-        let dims = info.as_ref().map(|i| (i.width, i.height)).unwrap_or_default();
-        (source.input.path.clone(), delivery, dims, info.as_ref().map(|i| i.duration_seconds))
+        let mp4 = info
+            .as_ref()
+            .is_some_and(|i| i.format.contains("mp4") && i.video_codec.as_deref() == Some("h264"));
+        let delivery = if mp4 {
+            Delivery::Video
+        } else {
+            Delivery::Document
+        };
+        let dims = info
+            .as_ref()
+            .map(|i| (i.width, i.height))
+            .unwrap_or_default();
+        (
+            source.input.path.clone(),
+            delivery,
+            dims,
+            info.as_ref().map(|i| i.duration_seconds),
+        )
     } else {
         let info = info.expect("metadata is required for processing");
         let gif_seconds = if job.options.is_clip() {
-            job.options.duration_seconds.unwrap_or(info.duration_seconds - job.options.start_seconds.unwrap_or(0.0))
+            job.options
+                .duration_seconds
+                .unwrap_or(info.duration_seconds - job.options.start_seconds.unwrap_or(0.0))
         } else {
             info.duration_seconds
         };
@@ -230,10 +306,26 @@ async fn run(svc: &MediaService, job: &JobRow, cancel: &CancellationToken) -> Re
                 ),
             ));
         }
-        let caps = client.as_ref().and_then(|c| c.capabilities()).ok_or_else(|| JobFailure::new("media_unavailable", "Media processing is unavailable."))?;
-        let rungs = plan(job.action, &job.options, &info, &caps, svc.config.media.gif_target_bytes).map_err(|m| JobFailure::new("unsupported_request", m))?;
+        let caps = client
+            .as_ref()
+            .and_then(|c| c.capabilities())
+            .ok_or_else(|| {
+                JobFailure::new("media_unavailable", "Media processing is unavailable.")
+            })?;
+        let rungs = plan(
+            job.action,
+            &job.options,
+            &info,
+            &caps,
+            svc.config.media.gif_target_bytes,
+        )
+        .map_err(|m| JobFailure::new("unsupported_request", m))?;
         let (path, rung) = encode(svc, job, &source.input, &rungs, &info, cancel).await?;
-        let seconds = if job.options.is_clip() { Some(gif_seconds) } else { Some(info.duration_seconds) };
+        let seconds = if job.options.is_clip() {
+            Some(gif_seconds)
+        } else {
+            Some(info.duration_seconds)
+        };
         (path, rung.delivery, rung.dims, seconds)
     };
 
@@ -241,70 +333,155 @@ async fn run(svc: &MediaService, job: &JobRow, cancel: &CancellationToken) -> Re
     deliver(svc, job, &source, &result, delivery, dims, duration, cancel).await
 }
 
-async fn obtain_source(svc: &MediaService, job: &JobRow, dir: &Path, cancel: &CancellationToken) -> Result<Source, JobFailure> {
+async fn obtain_source(
+    svc: &MediaService,
+    job: &JobRow,
+    dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<Source, JobFailure> {
     // A retained source from an earlier attempt is reused.
-    if let Some(p) = job.source_path.as_deref().map(PathBuf::from).filter(|p| p.exists()) {
-        let attribution = if job.source_kind == SourceKind::Url { Some((None, job.source_ref.clone())) } else { None };
-        return Ok(Source { input: Input::from_file(&p).await?, attribution });
+    if let Some(p) = job
+        .source_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+    {
+        let attribution = if job.source_kind == SourceKind::Url {
+            Some((None, job.source_ref.clone()))
+        } else {
+            None
+        };
+        return Ok(Source {
+            input: Input::from_file(&p).await?,
+            attribution,
+        });
     }
     if job.source_kind == SourceKind::Upload {
-        return Err(JobFailure::new("source_missing", "The uploaded file is no longer available."));
+        return Err(JobFailure::new(
+            "source_missing",
+            "The uploaded file is no longer available.",
+        ));
     }
     // Work-storage budget (SDS §2): defer rather than overcommit.
     let budget = svc.config.storage.work_budget_bytes as i64;
     let needed = (svc.config.media.max_source_bytes as i64) * 2;
     if jobs::reserved_bytes(&svc.db).await? + needed > budget {
-        return Err(JobFailure { retry_in: Some(30), ..JobFailure::new("storage_busy", "Waiting for work space…") });
+        return Err(JobFailure {
+            retry_in: Some(30),
+            ..JobFailure::new("storage_busy", "Waiting for work space…")
+        });
     }
     stage(svc, job, "downloading", "⬇️ Downloading…", cancel).await?;
     let dest = dir.join("source");
     match job.source_kind {
         SourceKind::TelegramFile => {
-            let bot = svc.bot.as_ref().ok_or_else(|| JobFailure::new("telegram_unavailable", "Telegram is not configured."))?;
-            let src: TelegramSource = serde_json::from_str(&job.source_ref).map_err(anyhow::Error::from)?;
-            let TelegramSource::File { file_id, .. } = src else { return Err(JobFailure::new("internal_error", "Invalid source.")) };
-            let max = svc.config.telegram.max_download_bytes.min(svc.config.media.max_source_bytes);
+            let bot = svc.bot.as_ref().ok_or_else(|| {
+                JobFailure::new("telegram_unavailable", "Telegram is not configured.")
+            })?;
+            let src: TelegramSource =
+                serde_json::from_str(&job.source_ref).map_err(anyhow::Error::from)?;
+            let TelegramSource::File { file_id, .. } = src else {
+                return Err(JobFailure::new("internal_error", "Invalid source."));
+            };
+            let max = svc
+                .config
+                .telegram
+                .max_download_bytes
+                .min(svc.config.media.max_source_bytes);
             let file = bot.get_file(&file_id).await.map_err(tg_failure)?;
-            let path = file.file_path.ok_or_else(|| JobFailure::new("telegram_file", "Telegram did not provide the file."))?;
-            bot.download_file(&path, &dest, max).await.map_err(tg_failure)?;
-            Ok(Source { input: Input::from_file(&dest).await?, attribution: None })
+            if file.file_size.is_some_and(|n| n > max) {
+                return Err(tg_failure(TgError::TooLarge));
+            }
+            let path = file.file_path.ok_or_else(|| {
+                JobFailure::new("telegram_file", "Telegram did not provide the file.")
+            })?;
+            bot.download_file(&path, &dest, max)
+                .await
+                .map_err(tg_failure)?;
+            Ok(Source {
+                input: Input::from_file(&dest).await?,
+                attribution: None,
+            })
         }
         SourceKind::Url => {
-            let url = Url::parse(&job.source_ref).map_err(|_| JobFailure::new("invalid_source", "The source link is not valid."))?;
+            let url = Url::parse(&job.source_ref)
+                .map_err(|_| JobFailure::new("invalid_source", "The source link is not valid."))?;
             let max = svc.config.media.max_source_bytes;
             if let Some(link) = parse_link(&url) {
                 stage(svc, job, "resolving", "🔎 Looking up the post…", cancel).await?;
-                let resolved = svc.extractor.resolve(&link).await.map_err(|e| extract_failure(&e))?;
-                let item = select(&resolved, job.options.media_index.or(link.media_index)).map_err(|e| extract_failure(&e))?;
+                let resolved = svc
+                    .extractor
+                    .resolve(&link)
+                    .await
+                    .map_err(|e| extract_failure(&e))?;
+                let item = select(&resolved, job.options.media_index.or(link.media_index))
+                    .map_err(|e| extract_failure(&e))?;
                 stage(svc, job, "downloading", "⬇️ Downloading…", cancel).await?;
                 let preferred = choose_candidate(&item, max).clone();
                 let mut ordered = vec![preferred.clone()];
                 ordered.extend(item.candidates.iter().filter(|c| **c != preferred).cloned());
                 let mut last = None;
                 for c in ordered {
-                    match svc.fetcher.download(&c.url, &resolved.media_hosts, &dest, max).await {
+                    match svc
+                        .fetcher
+                        .download(&c.url, &resolved.media_hosts, &dest, max)
+                        .await
+                    {
                         Ok(_) => {
-                            return Ok(Source { input: Input::from_file(&dest).await?, attribution: Some((resolved.author.clone(), resolved.post_url.clone())) });
+                            return Ok(Source {
+                                input: Input::from_file(&dest).await?,
+                                attribution: Some((
+                                    resolved.author.clone(),
+                                    resolved.post_url.clone(),
+                                )),
+                            });
                         }
-                        Err(crate::fetch::FetchError::TooLarge) => last = Some(JobFailure::new("source_too_large", format!("That video is larger than {}.", human_bytes(max)))),
+                        Err(crate::fetch::FetchError::TooLarge) => {
+                            last = Some(JobFailure::new(
+                                "source_too_large",
+                                format!("That video is larger than {}.", human_bytes(max)),
+                            ))
+                        }
                         Err(e) => {
                             warn!(job = %job.id, error = %e, "media download failed; trying the next rendition");
-                            last = Some(JobFailure::new("download_failed", "Downloading the video failed."));
+                            last = Some(JobFailure::new(
+                                "download_failed",
+                                "Downloading the video failed.",
+                            ));
                         }
                     }
                 }
-                Err(last.unwrap_or_else(|| JobFailure::new("download_failed", "Downloading the video failed.")))
+                Err(last.unwrap_or_else(|| {
+                    JobFailure::new("download_failed", "Downloading the video failed.")
+                }))
             } else if job.owner_kind == "api" {
                 // Direct HTTPS media URLs: API-only, same fetch restrictions.
                 let policy = HostPolicy::new([url.host_str().unwrap_or_default().to_owned()]);
-                svc.fetcher.download(&url, &policy, &dest, max).await.map_err(|e| match e {
-                    crate::fetch::FetchError::TooLarge => JobFailure::new("source_too_large", "The source is too large."),
-                    crate::fetch::FetchError::Blocked(m) => JobFailure::new("source_blocked", format!("That URL is not allowed: {m}.")),
-                    other => JobFailure::new("download_failed", format!("Downloading failed: {other}.")),
-                })?;
-                Ok(Source { input: Input::from_file(&dest).await?, attribution: None })
+                svc.fetcher
+                    .download(&url, &policy, &dest, max)
+                    .await
+                    .map_err(|e| match e {
+                        crate::fetch::FetchError::TooLarge => {
+                            JobFailure::new("source_too_large", "The source is too large.")
+                        }
+                        crate::fetch::FetchError::Blocked(m) => JobFailure::new(
+                            "source_blocked",
+                            format!("That URL is not allowed: {m}."),
+                        ),
+                        other => JobFailure::new(
+                            "download_failed",
+                            format!("Downloading failed: {other}."),
+                        ),
+                    })?;
+                Ok(Source {
+                    input: Input::from_file(&dest).await?,
+                    attribution: None,
+                })
             } else {
-                Err(JobFailure::new("unsupported_link", "Only X/Twitter and Bluesky post links are supported."))
+                Err(JobFailure::new(
+                    "unsupported_link",
+                    "Only X/Twitter and Bluesky post links are supported.",
+                ))
             }
         }
         SourceKind::Upload => unreachable!("handled above"),
@@ -313,10 +490,19 @@ async fn obtain_source(svc: &MediaService, job: &JobRow, dir: &Path, cancel: &Ca
 
 fn tg_failure(e: TgError) -> JobFailure {
     match e {
-        TgError::TooLarge => JobFailure::new("source_too_large", "That file is over Telegram's bot download limit."),
+        TgError::TooLarge => JobFailure::new(
+            "source_too_large",
+            "That file is over Telegram's bot download limit.",
+        ),
         other => {
             warn!(error = %other, "Telegram file download failed");
-            JobFailure { retry_in: Some(30), ..JobFailure::new("telegram_unavailable", "Telegram download failed; retrying.") }
+            JobFailure {
+                retry_in: Some(30),
+                ..JobFailure::new(
+                    "telegram_unavailable",
+                    "Telegram download failed; retrying.",
+                )
+            }
         }
     }
 }
@@ -339,19 +525,44 @@ fn attempt_base(job: &JobRow) -> u32 {
 }
 
 /// Runs one service operation with the §6.7 retry rules.
-async fn run_op(svc: &MediaService, job: &JobRow, step: &'static str, slot: u32, input: &Input, mut op: Operation, format: &'static str, out: &Path, cancel: &CancellationToken) -> Result<crate::ffmpeg::Completed, FfError> {
-    let client = svc.ffmpeg.as_ref().ok_or_else(|| FfError::Unavailable("disabled".into()))?;
+#[allow(clippy::too_many_arguments)]
+async fn run_op(
+    svc: &MediaService,
+    job: &JobRow,
+    step: &'static str,
+    slot: u32,
+    input: &Input,
+    mut op: Operation,
+    format: &'static str,
+    out: &Path,
+    cancel: &CancellationToken,
+) -> Result<crate::ffmpeg::Completed, FfError> {
+    let client = svc
+        .ffmpeg
+        .as_ref()
+        .ok_or_else(|| FfError::Unavailable("disabled".into()))?;
     let mut tries = 0;
     let mut fell_back = false;
     loop {
-        let attempt = Attempt { job_id: job.id.clone(), step, number: attempt_base(job) + slot * 10 + tries };
-        match client.run(&attempt, input, op.clone(), format, out, cancel).await {
+        let attempt = Attempt {
+            job_id: job.id.clone(),
+            step,
+            number: attempt_base(job) + slot * 10 + tries,
+        };
+        match client
+            .run(&attempt, input, op.clone(), format, out, cancel)
+            .await
+        {
             Ok(done) => return Ok(done),
             // A wrong remux choice falls back to transcoding once.
             Err(FfError::Failed { code, .. }) if code == "incompatible_output" && !fell_back => {
                 fell_back = true;
                 if let Operation::Remux { audio_mode } = op {
-                    op = Operation::Transcode(crate::ffmpeg::types::VideoParams { quality: Some(23), audio_mode, ..Default::default() });
+                    op = Operation::Transcode(crate::ffmpeg::types::VideoParams {
+                        quality: Some(23),
+                        audio_mode,
+                        ..Default::default()
+                    });
                 }
             }
             // A geometry mistake retries once without explicit dimensions.
@@ -379,20 +590,47 @@ async fn run_op(svc: &MediaService, job: &JobRow, step: &'static str, slot: u32,
     }
 }
 
-async fn metadata(svc: &MediaService, job: &JobRow, input: &Input, cancel: &CancellationToken) -> Result<MediaInfo, JobFailure> {
+async fn metadata(
+    svc: &MediaService,
+    job: &JobRow,
+    input: &Input,
+    cancel: &CancellationToken,
+) -> Result<MediaInfo, JobFailure> {
     let sha = input.sha256.clone();
     let cached: Option<String> = svc
         .db
-        .read(move |c| Ok(c.query_row("SELECT payload FROM metadata_cache WHERE sha256 = ?1", [sha], |r| r.get(0)).optional()?))
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT payload FROM metadata_cache WHERE sha256 = ?1",
+                [sha],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
         .await?;
     if let Some(info) = cached.and_then(|c| serde_json::from_str::<MediaInfo>(&c).ok()) {
         return Ok(info);
     }
     let out = svc.job_dir(&job.id).join("metadata.json");
-    run_op(svc, job, "meta", 0, input, Operation::Metadata {}, "json", &out, cancel).await.map_err(from_ff)?;
+    run_op(
+        svc,
+        job,
+        "meta",
+        0,
+        input,
+        Operation::Metadata {},
+        "json",
+        &out,
+        cancel,
+    )
+    .await
+    .map_err(from_ff)?;
     let raw = tokio::fs::read_to_string(&out).await?;
     let info: MediaInfo = serde_json::from_str(&raw).map_err(anyhow::Error::from)?;
-    let (sha, payload) = (input.sha256.clone(), serde_json::to_string(&info).map_err(anyhow::Error::from)?);
+    let (sha, payload) = (
+        input.sha256.clone(),
+        serde_json::to_string(&info).map_err(anyhow::Error::from)?,
+    );
     svc.db
         .write(move |tx| {
             Ok(tx.execute(
@@ -406,16 +644,45 @@ async fn metadata(svc: &MediaService, job: &JobRow, input: &Input, cancel: &Canc
 
 /// Runs the plan. For GIFs, each rung starts again from the source and the
 /// ladder stops at the first result within the size target.
-async fn encode(svc: &MediaService, job: &JobRow, input: &Input, rungs: &[Rung], _info: &MediaInfo, cancel: &CancellationToken) -> Result<(PathBuf, Rung), JobFailure> {
+async fn encode(
+    svc: &MediaService,
+    job: &JobRow,
+    input: &Input,
+    rungs: &[Rung],
+    _info: &MediaInfo,
+    cancel: &CancellationToken,
+) -> Result<(PathBuf, Rung), JobFailure> {
     let dir = svc.job_dir(&job.id);
     let target = svc.config.media.gif_target_bytes;
     let mut last_size = 0;
     for (i, rung) in rungs.iter().enumerate() {
         if i > 0 {
-            status(svc, job, &format!("⚙️ Result was {}; trying a smaller size ({}/{})…", human_bytes(last_size), i + 1, rungs.len())).await;
+            status(
+                svc,
+                job,
+                &format!(
+                    "⚙️ Result was {}; trying a smaller size ({}/{})…",
+                    human_bytes(last_size),
+                    i + 1,
+                    rungs.len()
+                ),
+            )
+            .await;
         }
         let out = dir.join(format!("result-{i}.{}", rung.format));
-        let done = run_op(svc, job, "main", 1 + i as u32, input, rung.op.clone(), rung.format, &out, cancel).await.map_err(from_ff)?;
+        let done = run_op(
+            svc,
+            job,
+            "main",
+            1 + i as u32,
+            input,
+            rung.op.clone(),
+            rung.format,
+            &out,
+            cancel,
+        )
+        .await
+        .map_err(from_ff)?;
         last_size = done.size;
         if rung.delivery != Delivery::Animation || done.size <= target {
             return Ok((out, rung.clone()));
@@ -424,12 +691,25 @@ async fn encode(svc: &MediaService, job: &JobRow, input: &Input, rungs: &[Rung],
     }
     Err(JobFailure::new(
         "gif_too_large",
-        format!("Could not get the GIF under {} after {} attempts. Try a shorter clip with start= and duration=.", human_bytes(target), rungs.len()),
+        format!(
+            "Could not get the GIF under {} after {} attempts. Try a shorter clip with start= and duration=.",
+            human_bytes(target),
+            rungs.len()
+        ),
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn deliver(svc: &MediaService, job: &JobRow, source: &Source, result: &Input, delivery: Delivery, dims: (u32, u32), duration: Option<f64>, cancel: &CancellationToken) -> Result<(), JobFailure> {
+async fn deliver(
+    svc: &MediaService,
+    job: &JobRow,
+    source: &Source,
+    result: &Input,
+    delivery: Delivery,
+    dims: (u32, u32),
+    duration: Option<f64>,
+    cancel: &CancellationToken,
+) -> Result<(), JobFailure> {
     let content_type = match result.path.extension().and_then(|e| e.to_str()) {
         Some("webm") => "video/webm",
         _ if job.action == Action::Fetch => "video/mp4",
@@ -450,14 +730,28 @@ async fn deliver(svc: &MediaService, job: &JobRow, source: &Source, result: &Inp
             if job.owner_kind == "telegram" {
                 return Err(JobFailure::new("result_too_large", msg));
             }
-            let _ = bot.send_message(chat, job.thread_id, &escape(&msg), job.reply_to, None).await;
+            let _ = bot
+                .send_message(chat, job.thread_id, &escape(&msg), job.reply_to, None)
+                .await;
         } else {
             let thumb = thumbnail(svc, job, result, dims, delivery, cancel).await;
-            let ext = result.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
-            let name = format!("{}-{}.{ext}", job.action, &job.id[job.id.len().saturating_sub(8)..]);
+            let ext = result
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mp4");
+            let name = format!(
+                "{}-{}.{ext}",
+                job.action,
+                &job.id[job.id.len().saturating_sub(8)..]
+            );
             let mut caption = format!("<b>{}</b>", job.action.label());
             if job.action != Action::Fetch {
-                caption.push_str(&format!(" · {} → {}", human_bytes(source.input.size), human_bytes(result.size)));
+                caption.push_str(&format!(
+                    " · {} → {}",
+                    human_bytes(source.input.size),
+                    human_bytes(result.size)
+                ));
             }
             if let Some((author, url)) = &source.attribution {
                 caption.push('\n');
@@ -492,20 +786,33 @@ async fn deliver(svc: &MediaService, job: &JobRow, source: &Source, result: &Inp
                     uncertain = true;
                 }
                 Err(TgError::RetryAfter(s)) => {
-                    return Err(JobFailure { retry_in: Some(s as i64 + 1), ..JobFailure::new("rate_limited", "Telegram rate limit; retrying.") });
+                    return Err(JobFailure {
+                        retry_in: Some(s as i64 + 1),
+                        ..JobFailure::new("rate_limited", "Telegram rate limit; retrying.")
+                    });
                 }
                 Err(e) => {
                     warn!(job = %job.id, error = %e, "delivery failed");
                     keep_for_download = job.owner_kind == "api";
                     if job.owner_kind == "telegram" {
-                        return Err(JobFailure::new("delivery_failed", "Telegram rejected the result."));
+                        return Err(JobFailure::new(
+                            "delivery_failed",
+                            "Telegram rejected the result.",
+                        ));
                     }
                 }
             }
         }
     }
     let result_path = if keep_for_download {
-        let kept = svc.job_dir(&job.id).join(format!("result.{}", result.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4")));
+        let kept = svc.job_dir(&job.id).join(format!(
+            "result.{}",
+            result
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mp4")
+        ));
         if kept != result.path {
             tokio::fs::copy(&result.path, &kept).await?;
         }
@@ -530,22 +837,50 @@ async fn deliver(svc: &MediaService, job: &JobRow, source: &Source, result: &Inp
     remove_except(&svc.job_dir(&job.id), result_path.as_deref()).await;
     let done = match job.action {
         Action::Fetch => "✅ Done".to_owned(),
-        _ => format!("✅ Done · {} → {}", human_bytes(source.input.size), human_bytes(result.size)),
+        _ => format!(
+            "✅ Done · {} → {}",
+            human_bytes(source.input.size),
+            human_bytes(result.size)
+        ),
     };
     status(svc, job, &done).await;
     Ok(())
 }
 
 /// Telegram thumbnail from the result; failures are not fatal.
-async fn thumbnail(svc: &MediaService, job: &JobRow, result: &Input, dims: (u32, u32), delivery: Delivery, cancel: &CancellationToken) -> Option<PathBuf> {
+async fn thumbnail(
+    svc: &MediaService,
+    job: &JobRow,
+    result: &Input,
+    dims: (u32, u32),
+    delivery: Delivery,
+    cancel: &CancellationToken,
+) -> Option<PathBuf> {
     if delivery == Delivery::Document || svc.unavailable_reason(Action::Mp4).is_some() {
         return None;
     }
     let (width, height) = thumbnail_box(dims.0, dims.1)?;
     let out = svc.job_dir(&job.id).join("thumb.jpg");
     for quality in [80u8, 60] {
-        let op = Operation::Thumbnail { timestamp_seconds: 0.5, width, height, jpeg_quality: quality };
-        match run_op(svc, job, "thumb", quality as u32, result, op, "jpg", &out, cancel).await {
+        let op = Operation::Thumbnail {
+            timestamp_seconds: 0.5,
+            width,
+            height,
+            jpeg_quality: quality,
+        };
+        match run_op(
+            svc,
+            job,
+            "thumb",
+            quality as u32,
+            result,
+            op,
+            "jpg",
+            &out,
+            cancel,
+        )
+        .await
+        {
             Ok(done) if done.size < 200 * 1024 => return Some(out),
             Ok(_) => continue,
             Err(e) => {
@@ -558,7 +893,9 @@ async fn thumbnail(svc: &MediaService, job: &JobRow, result: &Input, dims: (u32,
 }
 
 async fn remove_except(dir: &Path, keep: Option<&str>) {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
     while let Ok(Some(e)) = entries.next_entry().await {
         let p = e.path();
         if keep.is_none_or(|k| Path::new(k) != p) {
@@ -603,13 +940,23 @@ pub async fn housekeeping(svc: &MediaService) -> Result<()> {
     if let Ok(mut entries) = tokio::fs::read_dir(&root).await {
         while let Ok(Some(e)) = entries.next_entry().await {
             // Uploads write their directory before the job row exists.
-            let recent = e.metadata().await.ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|age| age < Duration::from_secs(3600));
+            let recent = e
+                .metadata()
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(3600));
             if recent {
                 continue;
             }
             let name = e.file_name().to_string_lossy().into_owned();
             let keep = match jobs::get(&svc.db, &name).await? {
-                Some(j) => j.is_active() || j.result_path.is_some() || j.source_kind == SourceKind::Upload && j.state == "queued",
+                Some(j) => {
+                    j.is_active()
+                        || j.result_path.is_some()
+                        || j.source_kind == SourceKind::Upload && j.state == "queued"
+                }
                 None => false,
             };
             if !keep {

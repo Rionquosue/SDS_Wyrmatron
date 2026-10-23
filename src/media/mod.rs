@@ -5,3 +5,6 @@ pub mod pipeline;
 pub mod plan;
 pub mod service;
 pub mod spec;
+
+#[cfg(test)]
+mod tests;

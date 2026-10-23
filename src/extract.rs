@@ -271,15 +271,16 @@ fn convert(item: &FxItem) -> Option<MediaItem> {
         .formats
         .iter()
         .any(|f| f.container.as_deref() == Some("m3u8"));
-    if candidates.is_empty() && item.format.as_deref() == Some("video/mp4") {
-        if let Some(u) = item.url.as_deref().and_then(|u| Url::parse(u).ok()) {
-            candidates.push(Candidate {
-                url: u,
-                bitrate: None,
-            });
-        }
+    if candidates.is_empty()
+        && item.format.as_deref() == Some("video/mp4")
+        && let Some(u) = item.url.as_deref().and_then(|u| Url::parse(u).ok())
+    {
+        candidates.push(Candidate {
+            url: u,
+            bitrate: None,
+        });
     }
-    candidates.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.bitrate));
     Some(MediaItem {
         kind,
         hls_only: candidates.is_empty()

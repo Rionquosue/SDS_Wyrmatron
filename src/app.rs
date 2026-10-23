@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::api::{self, AppState, StatusProvider};
-use crate::config::{read_secret, Config};
+use crate::config::{Config, read_secret};
 use crate::db::Db;
 use crate::extract::Extractor;
 use crate::fetch::Fetcher;
@@ -60,8 +60,12 @@ pub fn serve() -> ExitCode {
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("WYRMATRON_LOG_FORMAT").map(|v| v != "text").unwrap_or(true);
-    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_target(false);
+    let json = std::env::var("WYRMATRON_LOG_FORMAT")
+        .map(|v| v != "text")
+        .unwrap_or(true);
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false);
     if json {
         builder.json().init();
     } else {
@@ -91,14 +95,15 @@ async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
-        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "cannot listen for SIGTERM");
-                let _ = ctrl_c.await;
-                return;
-            }
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "cannot listen for SIGTERM");
+                    let _ = ctrl_c.await;
+                    return;
+                }
+            };
         tokio::select! {
             _ = ctrl_c => {}
             _ = term.recv() => {}
@@ -112,7 +117,9 @@ async fn run(config: Config) -> Result<()> {
     crate::http::init_tls();
     let config = Arc::new(config);
     info!(version = env!("CARGO_PKG_VERSION"), "starting Wyrmatron");
-    tokio::fs::create_dir_all(config.storage.work_dir.join("jobs")).await.context("creating the work directory")?;
+    tokio::fs::create_dir_all(config.storage.work_dir.join("jobs"))
+        .await
+        .context("creating the work directory")?;
     let db = Db::open(&config.storage.database_path()).await?;
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -120,7 +127,9 @@ async fn run(config: Config) -> Result<()> {
     // Telegram.
     let bot = if config.telegram.enabled {
         let token = read_secret(&config.telegram.token_file)?;
-        let http = crate::http::builder().connect_timeout(Duration::from_secs(10)).build()?;
+        let http = crate::http::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
         Some(Arc::new(Bot::new(http, &config.telegram.api_base, token)))
     } else {
         warn!("Telegram is disabled; notifications will stay queued");
@@ -133,14 +142,24 @@ async fn run(config: Config) -> Result<()> {
         Some(b) => b.clone(),
         None => Arc::new(NoTelegram),
     };
-    tasks.spawn(notify::run_worker(db.clone(), sink, outbox.clone(), shutdown.clone()));
+    tasks.spawn(notify::run_worker(
+        db.clone(),
+        sink,
+        outbox.clone(),
+        shutdown.clone(),
+    ));
 
     // Media.
     let fetcher = Arc::new(Fetcher::new(&config.fetch)?);
     let extractor = Arc::new(Extractor::new(fetcher.clone(), &config.fetch)?);
     let ffmpeg = if config.ffmpeg.enabled {
         let key = read_secret(&config.ffmpeg.key_file)?;
-        Some(Arc::new(FfmpegClient::new(&config.ffmpeg.base_url, key, db.clone(), config.ffmpeg.clone())?))
+        Some(Arc::new(FfmpegClient::new(
+            &config.ffmpeg.base_url,
+            key,
+            db.clone(),
+            config.ffmpeg.clone(),
+        )?))
     } else {
         warn!("FFmpeg service disabled; only /fetch and notifications are available");
         None
@@ -164,7 +183,11 @@ async fn run(config: Config) -> Result<()> {
         });
     }
     for n in 0..config.media.download_workers.max(1) {
-        tasks.spawn(media::pipeline::run_worker(media.clone(), format!("media-{n}"), shutdown.clone()));
+        tasks.spawn(media::pipeline::run_worker(
+            media.clone(),
+            format!("media-{n}"),
+            shutdown.clone(),
+        ));
     }
 
     // Telegram polling and update processing.
@@ -181,11 +204,28 @@ async fn run(config: Config) -> Result<()> {
                 }
             }
         };
-        let handler = Arc::new(Handler { bot: bot.clone(), db: db.clone(), config: config.clone(), username, media: media.clone() });
+        let handler = Arc::new(Handler {
+            bot: bot.clone(),
+            db: db.clone(),
+            config: config.clone(),
+            username,
+            media: media.clone(),
+        });
         let inbox = Arc::new(Notify::new());
         let poll = Duration::from_secs(config.telegram.poll_timeout_secs);
-        tasks.spawn(telegram::run_poller(bot, db.clone(), poll, inbox.clone(), shutdown.clone()));
-        tasks.spawn(telegram::run_processor(handler, db.clone(), inbox, shutdown.clone()));
+        tasks.spawn(telegram::run_poller(
+            bot,
+            db.clone(),
+            poll,
+            inbox.clone(),
+            shutdown.clone(),
+        ));
+        tasks.spawn(telegram::run_processor(
+            handler,
+            db.clone(),
+            inbox,
+            shutdown.clone(),
+        ));
     }
 
     tasks.spawn(maintenance(db.clone(), media.clone(), shutdown.clone()));
@@ -196,10 +236,16 @@ async fn run(config: Config) -> Result<()> {
         db: db.clone(),
         consumers: Arc::new(api::auth::Consumers::new(&config.consumers)),
         outbox,
-        status: if config.ffmpeg.enabled { media.clone() } else { Arc::new(NoMedia) },
+        status: if config.ffmpeg.enabled {
+            media.clone()
+        } else {
+            Arc::new(NoMedia)
+        },
         media: Some(media.clone()),
     };
-    let listener = tokio::net::TcpListener::bind(config.server.listen).await.with_context(|| format!("binding {}", config.server.listen))?;
+    let listener = tokio::net::TcpListener::bind(config.server.listen)
+        .await
+        .with_context(|| format!("binding {}", config.server.listen))?;
     info!(addr = %config.server.listen, "HTTP API listening");
     let stop = shutdown.clone();
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(async move {
@@ -212,10 +258,8 @@ async fn run(config: Config) -> Result<()> {
 
     // Let workers release leases and finish bookkeeping.
     let grace = Duration::from_secs(config.server.shutdown_grace_secs);
-    let drained = tokio::time::timeout(grace, async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await;
+    let drained =
+        tokio::time::timeout(grace, async { while tasks.join_next().await.is_some() {} }).await;
     if drained.is_err() {
         warn!("background tasks did not stop within the grace period");
         tasks.abort_all();
@@ -230,7 +274,10 @@ async fn release_leases(db: &Db) {
     let r = db
         .write(|tx| {
             Ok(tx.execute(
-                &format!("UPDATE jobs SET lease_until = 0, lease_owner = NULL WHERE state IN ({})", media::jobs::ACTIVE_STATES),
+                &format!(
+                    "UPDATE jobs SET lease_until = 0, lease_owner = NULL WHERE state IN ({})",
+                    media::jobs::ACTIVE_STATES
+                ),
                 [],
             )?)
         })
@@ -252,7 +299,7 @@ async fn capabilities_loop(client: Arc<FfmpegClient>, stop: CancellationToken) {
             }
             Err(e) => {
                 failures += 1;
-                if failures == 1 || failures % 10 == 0 {
+                if failures == 1 || failures.is_multiple_of(10) {
                     warn!(error = %e, failures, "FFmpeg service capabilities unavailable");
                 }
                 Duration::from_secs(30)

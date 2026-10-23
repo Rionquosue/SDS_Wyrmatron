@@ -15,8 +15,8 @@ use super::plan::requirements;
 use super::spec::Action;
 use crate::api::StatusProvider;
 use crate::config::Config;
-use crate::db::{now, Db};
-use crate::extract::{parse_link, Extractor};
+use crate::db::{Db, now};
+use crate::extract::{Extractor, parse_link};
 use crate::fetch::Fetcher;
 use crate::ffmpeg::FfmpegClient;
 use crate::telegram::client::Bot;
@@ -47,8 +47,12 @@ impl MediaService {
         if reqs.is_empty() {
             return None;
         }
-        let Some(client) = &self.ffmpeg else { return Some("media processing is disabled".into()) };
-        let Some(caps) = client.capabilities() else { return Some("the FFmpeg service is not reachable yet".into()) };
+        let Some(client) = &self.ffmpeg else {
+            return Some("media processing is disabled".into());
+        };
+        let Some(caps) = client.capabilities() else {
+            return Some("the FFmpeg service is not reachable yet".into());
+        };
         reqs.iter()
             .find(|(op, format, params)| !caps.supports(op, format, params))
             .map(|_| "the FFmpeg service does not support it yet (needs service 0.2)".to_owned())
@@ -73,7 +77,12 @@ impl MediaService {
     }
 
     fn describe(&self, j: &JobRow) -> String {
-        let mut s = format!("Job <code>{}</code> · <b>{}</b> · {}", j.id, j.action.label(), j.state);
+        let mut s = format!(
+            "Job <code>{}</code> · <b>{}</b> · {}",
+            j.id,
+            j.action.label(),
+            j.state
+        );
         if let Some(d) = &j.detail {
             s.push_str(&format!("\n{}", escape(d)));
         }
@@ -81,7 +90,11 @@ impl MediaService {
             s.push_str(&format!("\n⚠️ {}", escape(m)));
         }
         if let (Some(i), Some(o)) = (j.input_bytes, j.result_size) {
-            s.push_str(&format!("\n{} → {}", human_bytes(i as u64), human_bytes(o as u64)));
+            s.push_str(&format!(
+                "\n{} → {}",
+                human_bytes(i as u64),
+                human_bytes(o as u64)
+            ));
         }
         if j.delivery_uncertain {
             s.push_str("\nDelivery could not be confirmed; you may receive it twice.");
@@ -94,7 +107,10 @@ impl MediaService {
         if job_id.len() > 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(not_found());
         }
-        let job = jobs::get(&self.db, job_id).await.map_err(|_| "Could not look up that job.".to_owned())?.ok_or_else(not_found)?;
+        let job = jobs::get(&self.db, job_id)
+            .await
+            .map_err(|_| "Could not look up that job.".to_owned())?
+            .ok_or_else(not_found)?;
         // Other users' jobs are indistinguishable from missing ones.
         if admin || job.owned_by("telegram", &user_id.to_string()) {
             Ok(job)
@@ -127,21 +143,26 @@ impl MediaJobs for MediaService {
     async fn submit(&self, job: TelegramJob) -> Result<String, String> {
         let (source_kind, source_ref) = match &job.source {
             TelegramSource::Url { url } => {
-                let parsed = url::Url::parse(url).map_err(|_| "That link is not valid.".to_owned())?;
+                let parsed =
+                    url::Url::parse(url).map_err(|_| "That link is not valid.".to_owned())?;
                 if parse_link(&parsed).is_none() {
                     return Err("Only X/Twitter and Bluesky post links are supported.".into());
                 }
                 (SourceKind::Url, url.clone())
             }
-            TelegramSource::File { .. } => {
-                (SourceKind::TelegramFile, serde_json::to_string(&job.source).map_err(|e| e.to_string())?)
-            }
+            TelegramSource::File { .. } => (
+                SourceKind::TelegramFile,
+                serde_json::to_string(&job.source).map_err(|e| e.to_string())?,
+            ),
         };
         let mut options = job.options.clone();
-        if let TelegramSource::Url { url } = &job.source {
-            if options.media_index.is_none() {
-                options.media_index = url::Url::parse(url).ok().and_then(|u| parse_link(&u)).and_then(|l| l.media_index);
-            }
+        if let TelegramSource::Url { url } = &job.source
+            && options.media_index.is_none()
+        {
+            options.media_index = url::Url::parse(url)
+                .ok()
+                .and_then(|u| parse_link(&u))
+                .and_then(|l| l.media_index);
         }
         let created = self
             .create(NewJob {
@@ -177,9 +198,14 @@ impl MediaJobs for MediaService {
     async fn cancel(&self, job_id: &str, user_id: i64, admin: bool) -> Result<String, String> {
         let job = self.owned_job(job_id, user_id, admin).await?;
         if !job.is_active() {
-            return Ok(format!("Job <code>{}</code> already finished ({}).", job.id, job.state));
+            return Ok(format!(
+                "Job <code>{}</code> already finished ({}).",
+                job.id, job.state
+            ));
         }
-        MediaService::cancel(self, &job).await.map_err(|_| "Could not cancel the job.".to_owned())?;
+        MediaService::cancel(self, &job)
+            .await
+            .map_err(|_| "Could not cancel the job.".to_owned())?;
         Ok(format!("Cancelling job <code>{}</code>.", job.id))
     }
 }
@@ -191,7 +217,10 @@ impl StatusProvider for MediaService {
             .iter()
             .map(|a| {
                 let why = self.unavailable_reason(*a);
-                (a.as_str().to_owned(), json!({ "available": why.is_none(), "reason": why }))
+                (
+                    a.as_str().to_owned(),
+                    json!({ "available": why.is_none(), "reason": why }),
+                )
             })
             .collect();
         json!({

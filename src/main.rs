@@ -30,8 +30,12 @@ fn main() -> ExitCode {
         "healthcheck" => healthcheck(),
         "gen-key" => {
             // A new API key and the hash to put in the configuration.
-            let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-            println!("key:        {key}\nkey_sha256: {}", hex::encode(api::auth::sha256(key.as_bytes())));
+            let key =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+            println!(
+                "key:        {key}\nkey_sha256: {}",
+                hex::encode(api::auth::sha256(key.as_bytes()))
+            );
             ExitCode::SUCCESS
         }
         "hash-key" => {
@@ -57,7 +61,9 @@ fn main() -> ExitCode {
 /// Docker HEALTHCHECK: a plain HTTP request to the readiness endpoint, with
 /// no TLS or runtime setup.
 fn healthcheck() -> ExitCode {
-    let port = config::Config::load(None).map(|c| c.server.listen.port()).unwrap_or(8080);
+    let port = config::Config::load(None)
+        .map(|c| c.server.listen.port())
+        .unwrap_or(8080);
     let check = || -> std::io::Result<bool> {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let mut s = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;

@@ -179,10 +179,19 @@ pub struct FfmpegClient {
 
 #[derive(Debug)]
 pub struct Completed {
-    pub path: PathBuf,
     pub size: u64,
-    pub sha256: String,
-    pub content_type: String,
+}
+
+/// Content type the service reports for each output format.
+fn expected_type(format: &str) -> &'static str {
+    match format {
+        "json" => "application/json",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "jpg" => "image/jpeg",
+        "png" => "image/png",
+        _ => "application/octet-stream",
+    }
 }
 
 impl FfmpegClient {
@@ -363,7 +372,7 @@ impl FfmpegClient {
         {
             let _ = self.refresh_capabilities().await;
         }
-        let outcome = self.finish(&job, out, cancel).await;
+        let outcome = self.finish(&job, format, out, cancel).await;
         // Always release the remote job; it holds a consumer slot until deleted.
         self.delete(&job.job_id).await;
         let state = match &outcome {
@@ -469,6 +478,7 @@ impl FfmpegClient {
     async fn finish(
         &self,
         job: &Job,
+        format: &str,
         out: &Path,
         cancel: &CancellationToken,
     ) -> Result<Completed, FfError> {
@@ -500,12 +510,16 @@ impl FfmpegClient {
         let result = job
             .result
             .ok_or_else(|| FfError::Integrity("completed job without a result".into()))?;
+        if result.content_type != expected_type(format) {
+            return Err(FfError::Integrity(format!(
+                "expected {} output, got {}",
+                expected_type(format),
+                result.content_type
+            )));
+        }
         self.download(&job.job_id, &result, out).await?;
         Ok(Completed {
-            path: out.to_owned(),
             size: result.size_bytes,
-            sha256: result.sha256,
-            content_type: result.content_type,
         })
     }
 
@@ -892,7 +906,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tokio::fs::read(&out).await.unwrap(), b"encoded output");
-        assert_eq!(done.content_type, "video/mp4");
+        assert_eq!(done.size, 14);
         assert_eq!(attempt_state(&client).await, "completed");
         let deletes = server
             .received_requests()

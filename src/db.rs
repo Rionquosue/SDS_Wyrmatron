@@ -46,6 +46,7 @@ impl Db {
         Self::init(conn).await
     }
 
+    #[cfg(test)]
     pub async fn open_in_memory() -> Result<Self> {
         Self::init(tokio_rusqlite::Connection::open_in_memory().await?).await
     }

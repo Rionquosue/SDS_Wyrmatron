@@ -227,15 +227,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/hooks/uptime-kuma/{route_id}", post(kuma::hook))
         .layer(DefaultBodyLimit::max(cfg.json_body_limit))
-        .layer(limit(cfg.notification_concurrency, cfg.request_timeout_secs));
+        .layer(limit(
+            cfg.notification_concurrency,
+            cfg.request_timeout_secs,
+        ));
 
     // Media routes have their own limits, separate from notifications.
     let media_routes = Router::new()
         .route("/v1/media/jobs", post(media::create_job))
-        .route(
-            "/v1/jobs/{id}",
-            get(media::status).delete(media::delete),
-        )
+        .route("/v1/jobs/{id}", get(media::status).delete(media::delete))
         .route("/v1/jobs/{id}/download", get(media::download))
         .route_layer(authenticated.clone())
         .layer(DefaultBodyLimit::max(cfg.json_body_limit))

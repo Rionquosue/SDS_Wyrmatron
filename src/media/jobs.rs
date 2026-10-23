@@ -1,11 +1,11 @@
 //! Media job records (SDS §10).
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{OptionalExtension, Row, params};
 use serde::Serialize;
 
 use super::spec::{Action, JobOptions};
-use crate::db::{now, Db};
+use crate::db::{Db, now};
 
 pub const ACTIVE_STATES: &str = "'queued', 'resolving', 'downloading', 'processing', 'delivering'";
 
@@ -107,7 +107,10 @@ impl JobRow {
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self.state.as_str(), "queued" | "resolving" | "downloading" | "processing" | "delivering")
+        matches!(
+            self.state.as_str(),
+            "queued" | "resolving" | "downloading" | "processing" | "delivering"
+        )
     }
 
     /// Ownership check for status, cancellation and downloads (SDS §10).
@@ -121,6 +124,7 @@ impl JobRow {
 pub struct JobView {
     pub job_id: String,
     pub action: Action,
+    pub destination: Option<String>,
     pub state: String,
     pub detail: Option<String>,
     pub error: Option<serde_json::Value>,
@@ -135,10 +139,13 @@ pub struct JobView {
 
 impl From<&JobRow> for JobView {
     fn from(j: &JobRow) -> Self {
-        let downloadable = j.state == "completed" && j.result_path.is_some() && j.expires_at.is_some_and(|e| e > now());
+        let downloadable = j.state == "completed"
+            && j.result_path.is_some()
+            && j.expires_at.is_some_and(|e| e > now());
         Self {
             job_id: j.id.clone(),
             action: j.action,
+            destination: j.destination.clone(),
             state: j.state.clone(),
             detail: j.detail.clone(),
             error: j.error_code.as_ref().map(|c| serde_json::json!({ "code": c, "message": j.error_message })),
@@ -232,8 +239,15 @@ pub async fn create(db: &Db, id: String, job: NewJob) -> Result<Created> {
 
 pub async fn get(db: &Db, id: &str) -> Result<Option<JobRow>> {
     let id = id.to_owned();
-    db.read(move |c| Ok(c.query_row(&format!("SELECT {COLUMNS} FROM jobs WHERE id = ?1"), [id], JobRow::from_row).optional()?))
-        .await
+    db.read(move |c| {
+        Ok(c.query_row(
+            &format!("SELECT {COLUMNS} FROM jobs WHERE id = ?1"),
+            [id],
+            JobRow::from_row,
+        )
+        .optional()?)
+    })
+    .await
 }
 
 /// Claims the oldest runnable job: queued and due, or active with an
@@ -262,10 +276,18 @@ pub async fn claim(db: &Db, worker: &str, lease_secs: i64) -> Result<Option<JobR
     .await
 }
 
-pub async fn set_state(db: &Db, id: &str, state: &'static str, detail: Option<String>) -> Result<()> {
+pub async fn set_state(
+    db: &Db,
+    id: &str,
+    state: &'static str,
+    detail: Option<String>,
+) -> Result<()> {
     let id = id.to_owned();
     db.write(move |tx| {
-        tx.execute("UPDATE jobs SET state = ?2, detail = ?3, updated_at = ?4 WHERE id = ?1", params![id, state, detail, now()])?;
+        tx.execute(
+            "UPDATE jobs SET state = ?2, detail = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, state, detail, now()],
+        )?;
         Ok(())
     })
     .await
@@ -416,30 +438,53 @@ mod tests {
     #[tokio::test]
     async fn create_claim_and_cancel() {
         let db = Db::open_in_memory().await.unwrap();
-        let Created::New(id) = create(&db, new_id(), sample(Some("k1"))).await.unwrap() else { panic!() };
-        assert_eq!(create(&db, new_id(), sample(Some("k1"))).await.unwrap(), Created::Existing(id.clone()));
+        let Created::New(id) = create(&db, new_id(), sample(Some("k1"))).await.unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            create(&db, new_id(), sample(Some("k1"))).await.unwrap(),
+            Created::Existing(id.clone())
+        );
         let mut other = sample(Some("k1"));
         other.request_hash = Some("h2".into());
-        assert_eq!(create(&db, new_id(), other).await.unwrap(), Created::Conflict);
+        assert_eq!(
+            create(&db, new_id(), other).await.unwrap(),
+            Created::Conflict
+        );
 
         let job = claim(&db, "w1", 60).await.unwrap().unwrap();
-        assert_eq!((job.id.as_str(), job.state.as_str(), job.attempts), (id.as_str(), "resolving", 1));
-        assert!(claim(&db, "w2", 60).await.unwrap().is_none(), "leased jobs are not claimed twice");
+        assert_eq!(
+            (job.id.as_str(), job.state.as_str(), job.attempts),
+            (id.as_str(), "resolving", 1)
+        );
+        assert!(
+            claim(&db, "w2", 60).await.unwrap().is_none(),
+            "leased jobs are not claimed twice"
+        );
         // An expired lease is reclaimed in its current state.
-        db.write(|tx| Ok(tx.execute("UPDATE jobs SET lease_until = 0", [])?)).await.unwrap();
+        db.write(|tx| Ok(tx.execute("UPDATE jobs SET lease_until = 0", [])?))
+            .await
+            .unwrap();
         let again = claim(&db, "w2", 60).await.unwrap().unwrap();
         assert_eq!((again.state.as_str(), again.attempts), ("resolving", 2));
         // Cancelling a running job only sets the flag.
-        assert_eq!(request_cancel(&db, &id).await.unwrap().as_deref(), Some("resolving"));
+        assert_eq!(
+            request_cancel(&db, &id).await.unwrap().as_deref(),
+            Some("resolving")
+        );
         assert!(renew_lease(&db, &id, 60).await.unwrap());
     }
 
     #[tokio::test]
     async fn deferred_jobs_wait_and_queued_cancel_is_immediate() {
         let db = Db::open_in_memory().await.unwrap();
-        let Created::New(id) = create(&db, new_id(), sample(None)).await.unwrap() else { panic!() };
+        let Created::New(id) = create(&db, new_id(), sample(None)).await.unwrap() else {
+            panic!()
+        };
         claim(&db, "w", 60).await.unwrap().unwrap();
-        defer(&db, &id, 300, "waiting for disk space").await.unwrap();
+        defer(&db, &id, 300, "waiting for disk space")
+            .await
+            .unwrap();
         assert!(claim(&db, "w", 60).await.unwrap().is_none());
         request_cancel(&db, &id).await.unwrap();
         assert_eq!(get(&db, &id).await.unwrap().unwrap().state, "cancelled");

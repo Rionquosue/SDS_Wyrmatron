@@ -18,7 +18,8 @@ pub fn builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
 }
 
-/// Plain client for tests and fixed origins.
+/// Plain client for tests.
+#[cfg(test)]
 pub fn client() -> reqwest::Client {
     builder().build().expect("building HTTP client")
 }

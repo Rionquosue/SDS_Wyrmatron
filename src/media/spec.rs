@@ -75,13 +75,6 @@ pub enum CompressPreset {
 }
 
 impl CompressPreset {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Light => "light",
-            Self::Balanced => "balanced",
-            Self::Small => "small",
-        }
-    }
     /// (quality, audio kbps, longest edge, fps cap) per SDS §5.
     pub fn settings(self) -> (u8, u16, u32, Option<u32>) {
         match self {

@@ -141,7 +141,6 @@ pub struct CallbackQuery {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct File {
-    pub file_id: String,
     #[serde(default)]
     pub file_size: Option<u64>,
     #[serde(default)]
