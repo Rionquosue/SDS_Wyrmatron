@@ -33,6 +33,22 @@ jobs:
       - name: Container checks
         timeout-minutes: 10
         run: sh scripts/container-smoke.sh wyrmatron:test
+      # Attacks the binary shipped in the image through an emulated Telegram
+      # Bot API, FFmpeg service and SSRF canary (sandbox/README.md).
+      - name: Adversarial sandbox
+        timeout-minutes: 15
+        run: |
+          id="$(docker create wyrmatron:test)"
+          docker cp "$id:/usr/local/bin/wyrmatron" ./wyrmatron-image
+          docker rm "$id" >/dev/null
+          python3 sandbox/run.py --binary ./wyrmatron-image --report sandbox-report.md
+      - name: Upload sandbox report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-report-${{ matrix.runner }}
+          path: sandbox-report.md
+          if-no-files-found: ignore
       - name: Image size
         run: |
           docker image inspect wyrmatron:test --format '{{.Size}}' | awk '{ printf "image size %.1f MB\n", $1 / 1000000 }'

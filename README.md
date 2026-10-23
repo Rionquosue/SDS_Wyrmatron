@@ -189,11 +189,28 @@ docker build -t wyrmatron:test . && sh scripts/container-smoke.sh wyrmatron:test
 
 The image cross-compiles on the build platform with `cargo-zigbuild` (no emulation) for `linux/amd64` and `linux/arm64`, and the build fails if the binary is not static. The Rust toolchain is pinned in `rust-toolchain.toml` and base images by digest.
 
+## Security testing
+
+[`sandbox/`](sandbox/README.md) runs the real binary against an emulated Telegram Bot API, FFmpeg service and SSRF canary, and attacks it with 66 checks. They cover:
+
+- unauthorised access, and forged or replayed buttons;
+- HTML, shell, SQL and log injection;
+- malformed and oversized updates, floods and resource exhaustion;
+- Telegram faults, secret leakage, SSRF and HTTP API abuse.
+
+CI runs it on every push against the binary in the image:
+
+```sh
+python3 sandbox/run.py --binary target/release/wyrmatron --report sandbox-report.md
+```
+
+See its README for what it covers, what it found and fixed, and the remaining risks it can't test.
+
 ## Verification status
 
 Verified in the development environment (Rust 1.97.0):
 
-- 84 tests pass, covering:
+- 93 tests pass, covering:
   - configuration, the migrations and SQLite pragmas;
   - consumer authentication, notifications and the Kuma adapter (JSON, form-data, dedup, suppression, secret routes);
   - the outbox (split messages, resumption, permanent failures, lease recovery);
@@ -211,6 +228,8 @@ Verified in the development environment (Rust 1.97.0):
   - it exited cleanly on SIGTERM.
 
 - In GitHub Actions on amd64 and arm64 runners, the image builds (17.5–18 MB). `scripts/container-smoke.sh` passes against it: read-only root, non-root user, no capabilities, health, auth, notifications, the Kuma hook, graceful stop, and the outbox surviving container replacement. The Trivy scan reports no fixable high or critical findings.
+
+- The adversarial sandbox passes all 66 checks against the release binary.
 
 Not verified yet:
 

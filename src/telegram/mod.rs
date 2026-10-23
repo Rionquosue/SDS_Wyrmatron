@@ -23,6 +23,9 @@ use types::Update;
 
 const OFFSET_KEY: &str = "telegram_offset";
 
+/// Consecutive unparseable getUpdates responses before the backlog is skipped.
+const UNDECODABLE_LIMIT: u32 = 3;
+
 /// Stores updates and the next offset atomically.
 /// Stores raw updates and the next offset atomically. Each update is parsed
 /// later on its own, so a malformed one is skipped instead of blocking the
@@ -76,14 +79,26 @@ pub async fn run_poller(
         }
     }
     let mut failures = 0u32;
+    let mut undecodable = 0u32;
     loop {
-        let offset = match db.get_kv(OFFSET_KEY).await {
+        let mut offset = match db.get_kv(OFFSET_KEY).await {
             Ok(v) => v.and_then(|s| s.parse().ok()).unwrap_or(0i64),
             Err(e) => {
                 error!(error = %e, "reading the update offset failed");
                 0
             }
         };
+        if undecodable >= UNDECODABLE_LIMIT {
+            // The pending batch can never be parsed, so the offset cannot
+            // advance past it. Offset -1 confirms everything up to the newest
+            // update; the skipped updates are lost, but the bot recovers.
+            error!(
+                failures = undecodable,
+                "skipping Telegram updates that cannot be parsed"
+            );
+            offset = -1;
+            undecodable = 0;
+        }
         let result = tokio::select! {
             _ = shutdown.cancelled() => return,
             r = bot.get_updates(offset, poll_timeout) => r,
@@ -91,6 +106,7 @@ pub async fn run_poller(
         let delay = match result {
             Ok(updates) => {
                 failures = 0;
+                undecodable = 0;
                 match store_updates(&db, updates).await {
                     Ok(0) => None,
                     Ok(n) => {
@@ -105,6 +121,11 @@ pub async fn run_poller(
                 }
             }
             Err(TgError::RetryAfter(s)) => Some(Duration::from_secs(s)),
+            Err(TgError::Decode(e)) => {
+                undecodable += 1;
+                warn!(error = %e, failures = undecodable, "getUpdates returned a response that cannot be parsed");
+                Some(Duration::from_secs(1))
+            }
             Err(e) => {
                 failures += 1;
                 warn!(error = %e, failures, "getUpdates failed");

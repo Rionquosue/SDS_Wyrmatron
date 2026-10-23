@@ -26,6 +26,9 @@ use crate::text::escape;
 
 const LEASE_SECS: i64 = 300;
 
+/// Claims of one job before a temporary failure becomes permanent.
+const MAX_ATTEMPTS: i64 = 6;
+
 /// A failure reported to the job owner.
 #[derive(Debug)]
 pub struct JobFailure {
@@ -164,14 +167,18 @@ async fn process(svc: &MediaService, job: JobRow, cancel: &CancellationToken) {
             let _ = tokio::fs::remove_dir_all(svc.job_dir(&job.id)).await;
             status(svc, &job, "🚫 Cancelled.").await;
         }
+        // Temporary conditions are retried, but never indefinitely.
         Err(JobFailure {
             retry_in: Some(secs),
             message,
             ..
-        }) => {
+        }) if job.attempts < MAX_ATTEMPTS => {
             let _ = jobs::defer(&svc.db, &job.id, secs, &message).await;
         }
-        Err(f) => {
+        Err(mut f) => {
+            if f.retry_in.is_some() {
+                f.message = format!("{} Gave up after {MAX_ATTEMPTS} attempts.", f.message);
+            }
             warn!(job = %job.id, code = %f.code, "media job failed");
             let _ = jobs::fail(&svc.db, &job.id, &f.code, &f.message).await;
             let _ = tokio::fs::remove_dir_all(svc.job_dir(&job.id)).await;
@@ -494,14 +501,16 @@ fn tg_failure(e: TgError) -> JobFailure {
             "source_too_large",
             "That file is over Telegram's bot download limit.",
         ),
+        // Telegram refused the request (bad file_id, missing file): permanent.
+        TgError::Api { code, description } if (400..500).contains(&code) => {
+            warn!(code, error = %description, "Telegram refused the file download");
+            JobFailure::new("telegram_file", "Telegram could not provide that file.")
+        }
         other => {
             warn!(error = %other, "Telegram file download failed");
             JobFailure {
                 retry_in: Some(30),
-                ..JobFailure::new(
-                    "telegram_unavailable",
-                    "Telegram download failed; retrying.",
-                )
+                ..JobFailure::new("telegram_unavailable", "Telegram download failed.")
             }
         }
     }

@@ -106,6 +106,9 @@ impl RateLimiter {
     }
 }
 
+/// Longest Telegram flood-control wait retried inside a single call.
+const MAX_INLINE_RETRY_SECS: u64 = 30;
+
 pub enum MediaKind {
     Animation,
     Video,
@@ -179,21 +182,33 @@ impl Bot {
         })
     }
 
+    /// Calls a Bot API method. Short flood-control waits requested by
+    /// Telegram (429 `retry_after`) are honoured and retried, so replies are
+    /// delayed rather than lost under load.
     pub async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
         body: &impl Serialize,
         timeout: Duration,
     ) -> Result<T, TgError> {
-        let res = self
-            .http
-            .post(self.method_url(method))
-            .json(body)
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(TgError::from_reqwest)?;
-        Self::decode(res).await
+        let mut attempt = 0;
+        loop {
+            let res = self
+                .http
+                .post(self.method_url(method))
+                .json(body)
+                .timeout(timeout)
+                .send()
+                .await
+                .map_err(TgError::from_reqwest)?;
+            match Self::decode(res).await {
+                Err(TgError::RetryAfter(secs)) if secs <= MAX_INLINE_RETRY_SECS && attempt < 3 => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     pub async fn get_me(&self) -> Result<User, TgError> {
@@ -480,7 +495,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(path(format!("/bot{TOKEN}/sendMessage")))
             .respond_with(ResponseTemplate::new(429).set_body_json(json!({ "ok": false, "error_code": 429,
-                "description": "Too Many Requests: retry after 7", "parameters": { "retry_after": 7 } })))
+                "description": "Too Many Requests: retry after 60", "parameters": { "retry_after": 60 } })))
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -490,7 +505,8 @@ mod tests {
             .await;
         let b = bot(&server);
         assert!(
-            matches!(b.send_html(1, None, "x").await, Err(SendError::RetryAfter(d)) if d.as_secs() == 7)
+            // Long waits are left to the caller (the outbox reschedules).
+            matches!(b.send_html(1, None, "x").await, Err(SendError::RetryAfter(d)) if d.as_secs() == 60)
         );
         assert!(
             matches!(b.send_html(2, None, "x").await, Err(SendError::Permanent(m)) if m.contains("chat not found"))
@@ -506,6 +522,34 @@ mod tests {
         assert!(matches!(err, TgError::Connect(_)));
         let text = format!("{err} {err:?}");
         assert!(!text.contains("SECRET-TOKEN-VALUE"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn short_flood_waits_are_retried() {
+        let server = MockServer::start().await;
+        Mock::given(path(format!("/bot{TOKEN}/sendMessage")))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({ "ok": false, "error_code": 429,
+                "description": "Too Many Requests: retry after 1", "parameters": { "retry_after": 1 } })))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(path(format!("/bot{TOKEN}/sendMessage")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "ok": true, "result": {
+                "message_id": 5, "date": 1, "chat": { "id": 1, "type": "private" } } })),
+            )
+            .mount(&server)
+            .await;
+        let started = std::time::Instant::now();
+        let m = bot(&server)
+            .send_message(1, None, "x", None, None)
+            .await
+            .unwrap();
+        assert_eq!(m.message_id, 5);
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "each retry waits retry_after"
+        );
     }
 
     #[tokio::test]
