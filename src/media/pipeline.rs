@@ -502,7 +502,8 @@ fn tg_failure(e: TgError) -> JobFailure {
             "That file is over Telegram's bot download limit.",
         ),
         // Telegram refused the request (bad file_id, missing file): permanent.
-        TgError::Api { code, description } if (400..500).contains(&code) => {
+        // Includes redirects (3xx), which the Bot API never sends.
+        TgError::Api { code, description } if (300..500).contains(&code) => {
             warn!(code, error = %description, "Telegram refused the file download");
             JobFailure::new("telegram_file", "Telegram could not provide that file.")
         }

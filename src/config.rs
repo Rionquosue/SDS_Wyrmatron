@@ -53,6 +53,10 @@ pub struct ServerConfig {
     /// Concurrent requests allowed on media routes.
     pub media_concurrency: usize,
     pub request_timeout_secs: u64,
+    /// Time a client gets to send a complete request head (slowloris guard).
+    pub header_read_timeout_secs: u64,
+    /// Simultaneous HTTP connections; more are closed at accept.
+    pub max_connections: usize,
     /// Grace period for in-flight work after SIGTERM.
     pub shutdown_grace_secs: u64,
     pub worker_threads: usize,
@@ -66,6 +70,8 @@ impl Default for ServerConfig {
             notification_concurrency: 16,
             media_concurrency: 4,
             request_timeout_secs: 30,
+            header_read_timeout_secs: 10,
+            max_connections: 256,
             shutdown_grace_secs: 15,
             worker_threads: 2,
         }

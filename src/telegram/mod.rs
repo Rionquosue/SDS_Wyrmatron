@@ -1,5 +1,5 @@
 //! Telegram long polling. Updates are written to an inbox in the same
-//! transaction that advances the offset, then processed in order (SDS §4).
+//! transaction that advances the offset, then processed in order within each chat (SDS §4).
 
 pub mod access;
 pub mod client;
@@ -7,12 +7,14 @@ pub mod commands;
 pub mod handler;
 pub mod types;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::params;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -26,7 +28,6 @@ const OFFSET_KEY: &str = "telegram_offset";
 /// Consecutive unparseable getUpdates responses before the backlog is skipped.
 const UNDECODABLE_LIMIT: u32 = 3;
 
-/// Stores updates and the next offset atomically.
 /// Stores raw updates and the next offset atomically. Each update is parsed
 /// later on its own, so a malformed one is skipped instead of blocking the
 /// queue; only `update_id` is needed here.
@@ -141,22 +142,119 @@ pub async fn run_poller(
     }
 }
 
-/// Processes stored updates in order. Each update runs in its own task so a
-/// panic affects only that update.
+/// Updates handled at the same time, across all chats.
+const MAX_CONCURRENT_UPDATES: usize = 32;
+/// Updates dispatched to chat lanes but not yet finished.
+const MAX_PENDING_UPDATES: usize = 1024;
+/// A lane with nothing to do for this long shuts down.
+const LANE_IDLE: Duration = Duration::from_secs(30);
+
+/// Updates from one chat are handled in order; chats are independent, so a
+/// slow chat (flood control, a slow Telegram answer) cannot hold up the rest.
+fn lane_key(u: &Update) -> i64 {
+    if let Some(m) = &u.message {
+        return m.chat.id;
+    }
+    if let Some(q) = &u.callback_query {
+        return q.message.as_ref().map_or(q.from.id, |m| m.chat.id);
+    }
+    0
+}
+
+struct Item {
+    id: i64,
+    update: Option<Update>,
+    _pending: OwnedSemaphorePermit,
+}
+
+struct Lane {
+    tx: mpsc::UnboundedSender<Item>,
+    task: JoinHandle<()>,
+}
+
+struct Ctx {
+    handler: Arc<Handler>,
+    db: Db,
+    running: Arc<Semaphore>,
+    shutdown: CancellationToken,
+}
+
+impl Ctx {
+    async fn process(&self, item: Item) {
+        let id = item.id;
+        if let Some(update) = item.update {
+            let Ok(_slot) = self.running.acquire().await else {
+                return;
+            };
+            // Each update runs in its own task so a panic affects only it.
+            let h = self.handler.clone();
+            match tokio::spawn(async move { h.handle(update).await }).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(update = id, error = %e, "handling update failed"),
+                Err(e) => error!(update = id, error = %e, "update handler panicked"),
+            }
+        }
+        if let Err(e) = self
+            .db
+            .write(move |tx| {
+                Ok(tx.execute("DELETE FROM telegram_inbox WHERE update_id = ?1", [id])?)
+            })
+            .await
+        {
+            error!(error = %e, "removing a processed update failed");
+        }
+    }
+
+    async fn run_lane(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<Item>) {
+        loop {
+            let next = tokio::select! {
+                _ = self.shutdown.cancelled() => return,
+                n = tokio::time::timeout(LANE_IDLE, rx.recv()) => n,
+            };
+            match next {
+                Ok(Some(item)) => self.process(item).await,
+                Ok(None) => return,
+                Err(_) => break,
+            }
+        }
+        // Idle: refuse new items (the dispatcher starts a new lane for them,
+        // which waits for this one) and finish what is already queued.
+        rx.close();
+        while let Ok(item) = rx.try_recv() {
+            if self.shutdown.is_cancelled() {
+                return;
+            }
+            self.process(item).await;
+        }
+    }
+}
+
+/// Dispatches stored updates to per-chat lanes in `update_id` order. A row
+/// leaves the inbox only once handled, so after a crash anything unfinished
+/// is processed again, still in order within each chat.
 pub async fn run_processor(
     handler: Arc<Handler>,
     db: Db,
     wake: Arc<Notify>,
     shutdown: CancellationToken,
 ) {
-    loop {
+    let ctx = Arc::new(Ctx {
+        handler,
+        db: db.clone(),
+        running: Arc::new(Semaphore::new(MAX_CONCURRENT_UPDATES)),
+        shutdown: shutdown.clone(),
+    });
+    let pending = Arc::new(Semaphore::new(MAX_PENDING_UPDATES));
+    let mut lanes: HashMap<i64, Lane> = HashMap::new();
+    let mut dispatched = i64::MIN;
+    'outer: loop {
         let batch: Result<Vec<(i64, String)>> = db
-            .read(|c| {
+            .read(move |c| {
                 let mut st = c.prepare(
-                    "SELECT update_id, payload FROM telegram_inbox ORDER BY update_id LIMIT 20",
+                    "SELECT update_id, payload FROM telegram_inbox WHERE update_id > ?1 ORDER BY update_id LIMIT 100",
                 )?;
                 let rows = st
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .query_map([dispatched], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok(rows)
             })
@@ -169,37 +267,60 @@ pub async fn run_processor(
             }
         };
         let idle = batch.is_empty();
+        lanes.retain(|_, l| !l.task.is_finished());
         for (id, payload) in batch {
-            if shutdown.is_cancelled() {
-                return;
-            }
-            match serde_json::from_str::<Update>(&payload) {
-                Ok(update) => {
-                    let h = handler.clone();
-                    match tokio::spawn(async move { h.handle(update).await }).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => warn!(update = id, error = %e, "handling update failed"),
-                        Err(e) => error!(update = id, error = %e, "update handler panicked"),
-                    }
+            let permit = tokio::select! {
+                _ = shutdown.cancelled() => break 'outer,
+                p = pending.clone().acquire_owned() => match p {
+                    Ok(p) => p,
+                    Err(_) => break 'outer,
+                },
+            };
+            dispatched = id;
+            let update = match serde_json::from_str::<Update>(&payload) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    warn!(update = id, error = %e, "dropping undecodable update");
+                    None
                 }
-                Err(e) => warn!(update = id, error = %e, "dropping undecodable update"),
+            };
+            let key = update.as_ref().map_or(0, lane_key);
+            let mut item = Item {
+                id,
+                update,
+                _pending: permit,
+            };
+            let mut previous = None;
+            if let Some(lane) = lanes.get(&key) {
+                match lane.tx.send(item) {
+                    Ok(()) => continue,
+                    // The lane is shutting down; start a successor.
+                    Err(mpsc::error::SendError(back)) => item = back,
+                }
+                previous = lanes.remove(&key).map(|l| l.task);
             }
-            if let Err(e) = db
-                .write(move |tx| {
-                    Ok(tx.execute("DELETE FROM telegram_inbox WHERE update_id = ?1", [id])?)
-                })
-                .await
-            {
-                error!(error = %e, "removing a processed update failed");
-            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(item);
+            let c = ctx.clone();
+            let task = tokio::spawn(async move {
+                if let Some(p) = previous {
+                    let _ = p.await;
+                }
+                c.run_lane(rx).await;
+            });
+            lanes.insert(key, Lane { tx, task });
         }
         if idle {
             tokio::select! {
-                _ = shutdown.cancelled() => return,
+                _ = shutdown.cancelled() => break,
                 _ = wake.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {}
             }
         }
+    }
+    // Lanes finish the update in hand and stop.
+    for (_, lane) in lanes {
+        let _ = lane.task.await;
     }
 }
 

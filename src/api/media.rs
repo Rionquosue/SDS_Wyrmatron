@@ -231,6 +231,9 @@ fn malformed(msg: &str) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, "malformed_request", msg)
 }
 
+/// Largest JSON `request` part accepted by the upload route.
+const MAX_REQUEST_PART: usize = 16 * 1024;
+
 pub async fn upload(
     State(state): State<AppState>,
     Extension(consumer): Extension<Arc<Consumer>>,
@@ -250,17 +253,26 @@ pub async fn upload(
     if first.name() != Some("request") {
         return Err(malformed("The first part must be named request.").with_field("request"));
     }
-    let raw = first
-        .bytes()
+    // The upload route has no body limit, so the part is read in chunks and
+    // refused as soon as it is too large instead of being buffered whole.
+    let mut first = first;
+    let mut raw = Vec::new();
+    while let Some(chunk) = first
+        .chunk()
         .await
-        .map_err(|_| malformed("Unreadable request part."))?;
-    if raw.len() > 16 * 1024 {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "body_too_large",
-            "The request part is too large.",
-        ));
+        .map_err(|_| malformed("Unreadable request part."))?
+    {
+        if raw.len() + chunk.len() > MAX_REQUEST_PART {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+                "The request part is too large.",
+            ));
+        }
+        raw.extend_from_slice(&chunk);
     }
+    // The next part can only be read once this one is released.
+    drop(first);
     let mut req: UploadRequest = serde_json::from_slice(&raw).map_err(|e| {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

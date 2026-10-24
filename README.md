@@ -191,12 +191,13 @@ The image cross-compiles on the build platform with `cargo-zigbuild` (no emulati
 
 ## Security testing
 
-[`sandbox/`](sandbox/README.md) runs the real binary against an emulated Telegram Bot API, FFmpeg service and SSRF canary, and attacks it with 66 checks. They cover:
+[`sandbox/`](sandbox/README.md) runs the real binary against an emulated Telegram Bot API, FFmpeg service and SSRF canary, and attacks it with 98 checks. They cover:
 
 - unauthorised access, and forged or replayed buttons;
 - HTML, shell, SQL and log injection;
 - malformed and oversized updates, floods and resource exhaustion;
-- Telegram faults, secret leakage, SSRF and HTTP API abuse.
+- Telegram faults, secret leakage, SSRF and HTTP API abuse;
+- 16 less common attacks aimed at this bot's design: Trojan Source text, head-of-line blocking, button double-spend races, whitelist revocation and tampering, redirected downloads, memory bombs, request smuggling, slowloris, existence oracles, idempotency-key confusion, duplicate JSON keys, numeric edge cases, look-alike hosts and admin impersonation.
 
 CI runs it on every push against the binary in the image:
 
@@ -210,7 +211,7 @@ See its README for what it covers, what it found and fixed, and the remaining ri
 
 Verified in the development environment (Rust 1.97.0):
 
-- 93 tests pass, covering:
+- 98 tests pass, covering:
   - configuration, the migrations and SQLite pragmas;
   - consumer authentication, notifications and the Kuma adapter (JSON, form-data, dedup, suppression, secret routes);
   - the outbox (split messages, resumption, permanent failures, lease recovery);
@@ -229,7 +230,7 @@ Verified in the development environment (Rust 1.97.0):
 
 - In GitHub Actions on amd64 and arm64 runners, the image builds (17.5–18 MB). `scripts/container-smoke.sh` passes against it: read-only root, non-root user, no capabilities, health, auth, notifications, the Kuma hook, graceful stop, and the outbox surviving container replacement. The Trivy scan reports no fixable high or critical findings.
 
-- The adversarial sandbox passes all 66 checks against the release binary.
+- The adversarial sandbox passes all 98 checks against the release binary.
 
 Not verified yet:
 

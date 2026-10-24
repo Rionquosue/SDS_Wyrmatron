@@ -331,6 +331,21 @@ impl Handler {
                     .await?;
             return Ok(());
         }
+        // Refused up front, so no "Queued" placeholder appears for it.
+        if let TelegramSource::Url { url } = &source
+            && !url::Url::parse(url).is_ok_and(|u| self.media.supported_link(&u))
+        {
+            self.bot
+                .send_message(
+                    chat_id,
+                    thread_id,
+                    "⚠️ Only X/Twitter and Bluesky post links are supported.",
+                    Some(reply_to),
+                    None,
+                )
+                .await?;
+            return Ok(());
+        }
         let status = self
             .bot
             .send_message(
@@ -454,35 +469,48 @@ impl Handler {
             self.bot.answer_callback(&q.id, None).await?;
             return Ok(());
         };
+        if !self.chat_allowed(&msg.chat) {
+            self.bot.answer_callback(&q.id, None).await?;
+            return Ok(());
+        }
         let token = data.to_owned();
-        let row: Option<TokenRow> = self
+        let (from, chat_id, message_id, t) = (q.from.id, msg.chat.id, msg.message_id, now());
+        // Checked and consumed in one transaction, so two presses (or two
+        // buttons on the same prompt) can never both succeed.
+        let valid: Option<TokenRow> = self
             .db
-            .read(move |c| {
-                Ok(c.query_row(
-                    "SELECT user_id, chat_id, thread_id, message_id, action, payload, expires_at FROM callback_tokens WHERE token = ?1",
-                    [token],
-                    |r| {
-                        Ok(TokenRow {
-                            user: r.get(0)?,
-                            chat: r.get(1)?,
-                            thread: r.get(2)?,
-                            message_id: r.get(3)?,
-                            action: r.get(4)?,
-                            payload: r.get(5)?,
-                            expires_at: r.get(6)?,
-                        })
-                    },
-                )
-                .optional()?)
+            .write(move |tx| {
+                let row = tx
+                    .query_row(
+                        "SELECT user_id, chat_id, thread_id, message_id, action, payload, expires_at FROM callback_tokens WHERE token = ?1",
+                        [token],
+                        |r| {
+                            Ok(TokenRow {
+                                user: r.get(0)?,
+                                chat: r.get(1)?,
+                                thread: r.get(2)?,
+                                message_id: r.get(3)?,
+                                action: r.get(4)?,
+                                payload: r.get(5)?,
+                                expires_at: r.get(6)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                // Bound to the requesting user, chat and prompt message.
+                let row = row.filter(|r| {
+                    r.user == from && r.chat == chat_id && r.message_id == message_id && r.expires_at > t
+                });
+                if let Some(r) = &row {
+                    // Consume every button on the prompt.
+                    tx.execute(
+                        "DELETE FROM callback_tokens WHERE chat_id = ?1 AND message_id = ?2",
+                        params![r.chat, r.message_id],
+                    )?;
+                }
+                Ok(row)
             })
             .await?;
-        // Bound to the requesting user, chat and prompt message; rechecked on click.
-        let valid = row.filter(|t| {
-            t.user == q.from.id
-                && t.chat == msg.chat.id
-                && t.message_id == msg.message_id
-                && t.expires_at > now()
-        });
         let Some(TokenRow {
             user,
             chat,
@@ -499,19 +527,6 @@ impl Handler {
                 .await?;
             return Ok(());
         };
-        if !self.chat_allowed(&msg.chat) {
-            self.bot.answer_callback(&q.id, None).await?;
-            return Ok(());
-        }
-        // Consume every button on the prompt.
-        self.db
-            .write(move |tx| {
-                Ok(tx.execute(
-                    "DELETE FROM callback_tokens WHERE chat_id = ?1 AND message_id = ?2",
-                    params![chat, msg_id],
-                )?)
-            })
-            .await?;
         self.bot.answer_callback(&q.id, None).await?;
         let (Ok(action), Ok(p)) = (
             action.parse::<Action>(),

@@ -49,6 +49,10 @@ type Stamp = Option<(SystemTime, u64)>;
 struct Listed {
     ids: HashSet<i64>,
     stamp: Stamp,
+    /// The file does not exist.
+    missing: bool,
+    /// The missing whitelist has been reported.
+    reported: bool,
 }
 
 impl Listed {
@@ -60,9 +64,13 @@ impl Listed {
         if stamp == self.stamp && stamp.is_some() {
             return;
         }
+        self.missing = false;
         self.ids = match std::fs::read_to_string(path) {
             Ok(text) => parse_ids(&text),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.missing = true;
+                HashSet::new()
+            }
             Err(e) => {
                 // Keep the previous list rather than dropping everyone.
                 error!(path = %path.display(), error = %e, "reading access list failed");
@@ -154,6 +162,15 @@ impl AccessList {
         if white.ids.contains(&user.id) {
             return Verdict::Allowed;
         }
+        if white.missing {
+            // Deleted, or caught mid-replace: serve admins only, and do not
+            // blocklist whitelisted users who happen to write meanwhile.
+            if !std::mem::replace(&mut white.reported, true) {
+                error!(path = %self.whitelist_path.display(), "the whitelist is missing; only admins are served");
+            }
+            return Verdict::Blocked;
+        }
+        white.reported = false;
         black.refresh(&self.blocklist_path);
         if black.ids.contains(&user.id) {
             return Verdict::Blocked;
@@ -287,6 +304,7 @@ mod tests {
     fn unknown_accounts_are_blocked_once_and_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let a = lists(dir.path());
+        a.ensure_whitelist().unwrap();
         assert_eq!(
             a.check(&user(7, Some("spam\nmer")), "chat -1001 command /gif"),
             Verdict::NewlyBlocked
@@ -313,6 +331,7 @@ mod tests {
     fn host_edits_apply_without_restart() {
         let dir = tempfile::tempdir().unwrap();
         let a = lists(dir.path());
+        a.ensure_whitelist().unwrap();
         assert_eq!(
             a.check(&user(7, None), "private chat"),
             Verdict::NewlyBlocked
@@ -333,11 +352,35 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_whitelist_blocks_without_blocklisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = lists(dir.path());
+        std::fs::write(a.whitelist_path(), "42\n").unwrap();
+        assert_eq!(a.check(&user(42, None), "x"), Verdict::Allowed);
+        std::fs::remove_file(a.whitelist_path()).unwrap();
+        assert_eq!(a.check(&user(42, None), "x"), Verdict::Blocked);
+        assert_eq!(a.check(&user(7, None), "x"), Verdict::Blocked);
+        assert_eq!(
+            a.check(&user(1, None), "x"),
+            Verdict::Allowed,
+            "admins are still served"
+        );
+        assert!(
+            !a.blocklist_path().exists(),
+            "nothing is recorded while the whitelist is missing"
+        );
+        std::fs::write(a.whitelist_path(), "42\n").unwrap();
+        assert_eq!(a.check(&user(42, None), "x"), Verdict::Allowed);
+        assert_eq!(a.check(&user(7, None), "x"), Verdict::NewlyBlocked);
+    }
+
+    #[test]
     fn blocks_even_when_the_blocklist_cannot_be_written() {
         let dir = tempfile::tempdir().unwrap();
         // A directory where the file should be makes the append fail.
         std::fs::create_dir(dir.path().join("blocklist.cfg")).unwrap();
         let a = lists(dir.path());
+        a.ensure_whitelist().unwrap();
         assert_eq!(
             a.check(&user(9, None), "private chat"),
             Verdict::NewlyBlocked
@@ -349,6 +392,7 @@ mod tests {
     fn context_cannot_inject_lines() {
         let dir = tempfile::tempdir().unwrap();
         let a = lists(dir.path());
+        a.ensure_whitelist().unwrap();
         a.check(
             &user(7, Some("x\n42")),
             "chat 1 command /gif\n42 # injected\r\n43",

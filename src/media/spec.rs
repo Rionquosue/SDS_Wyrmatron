@@ -127,6 +127,9 @@ impl JobOptions {
                 return Err(format!("{name} must be a number of seconds."));
             }
         }
+        if self.media_index == Some(0) {
+            return Err("video must be 1 or more.".into());
+        }
         if self.duration_seconds == Some(0.0) {
             return Err("duration must be greater than zero.".into());
         }
@@ -275,5 +278,11 @@ mod tests {
             ..Default::default()
         };
         assert!(clip.validate(Action::Fetch, 30.0).is_err());
+        // The API takes options as JSON, bypassing parse_args.
+        let index = JobOptions {
+            media_index: Some(0),
+            ..Default::default()
+        };
+        assert!(index.validate(Action::Fetch, 30.0).is_err());
     }
 }

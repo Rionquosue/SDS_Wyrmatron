@@ -6,3 +6,4 @@ config.local.toml
 /data/
 /work/
 .env
+__pycache__/

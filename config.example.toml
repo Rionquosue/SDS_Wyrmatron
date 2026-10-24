@@ -6,6 +6,10 @@
 [server]
 listen = "0.0.0.0:8080"
 # json_body_limit = 65536
+# Time a client gets to send a complete request head (slowloris guard).
+# header_read_timeout_secs = 10
+# Simultaneous connections; further ones are closed at accept.
+# max_connections = 256
 # notification_concurrency = 16
 # media_concurrency = 4
 # worker_threads = 2

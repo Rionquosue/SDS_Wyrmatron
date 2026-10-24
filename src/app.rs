@@ -141,8 +141,10 @@ async fn run(config: Config) -> Result<()> {
     // Telegram.
     let bot = if config.telegram.enabled {
         let token = read_secret(&config.telegram.token_file)?;
+        // The Bot API never redirects; following one could reach internal hosts.
         let http = crate::http::builder()
             .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Some(Arc::new(Bot::new(http, &config.telegram.api_base, token)))
     } else {
@@ -284,12 +286,17 @@ async fn run(config: Config) -> Result<()> {
         .with_context(|| format!("binding {}", config.server.listen))?;
     info!(addr = %config.server.listen, "HTTP API listening");
     let stop = shutdown.clone();
-    let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(async move {
+    let limits = api::serve::Limits {
+        header_read_timeout: Duration::from_secs(config.server.header_read_timeout_secs),
+        max_connections: config.server.max_connections,
+        ..Default::default()
+    };
+    api::serve::serve(listener, api::router(state), limits, async move {
         shutdown_signal().await;
         info!("shutdown requested");
         stop.cancel();
-    });
-    let served = server.await;
+    })
+    .await;
     shutdown.cancel();
 
     // Let workers release leases and finish bookkeeping.
@@ -302,7 +309,7 @@ async fn run(config: Config) -> Result<()> {
     }
     release_leases(&db).await;
     info!("stopped");
-    served.context("HTTP server")
+    Ok(())
 }
 
 /// Jobs interrupted by shutdown become claimable immediately on restart.

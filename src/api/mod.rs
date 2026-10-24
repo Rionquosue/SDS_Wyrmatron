@@ -5,6 +5,7 @@ pub mod auth;
 mod kuma;
 mod media;
 mod notifications;
+pub mod serve;
 
 use std::sync::Arc;
 use std::time::Duration;

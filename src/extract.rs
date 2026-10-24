@@ -299,7 +299,7 @@ pub fn select(resolved: &Resolved, index: Option<u32>) -> Result<MediaItem, Extr
         Some(n) => {
             let item = resolved
                 .items
-                .get(n as usize - 1)
+                .get((n as usize).wrapping_sub(1))
                 .cloned()
                 .ok_or(ExtractError::NoSuchItem(n))?;
             if item.candidates.is_empty() && !item.hls_only {

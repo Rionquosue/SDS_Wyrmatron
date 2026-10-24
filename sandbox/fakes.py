@@ -121,7 +121,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client gave up on an oversized response, as it should
 
 
 def parse_form(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, bytes]]:
@@ -164,6 +167,8 @@ class FakeTelegram:
         self.faults: dict[str, list[tuple[int, Any]]] = {}
         # getUpdates answered with raw bytes (malformed responses)
         self.raw_updates_responses: list[bytes] = []
+        # chat_id -> seconds every sendMessage to that chat takes to answer
+        self.stall: dict[int, float] = {}
         self.server = _serve(_TelegramHandler, self)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
@@ -187,12 +192,13 @@ class FakeTelegram:
             self.lock.notify_all()
 
     def add_file(self, file_id: str, data: bytes | None = None, *, size: int | None = None,
-                 path: str | None = None, endless: bool = False) -> None:
+                 path: str | None = None, endless: bool = False, redirect: str | None = None) -> None:
         self.files[file_id] = {
             "data": data or b"",
             "size": size if size is not None else len(data or b""),
             "path": path or f"videos/{file_id}.mp4",
             "endless": endless,
+            "redirect": redirect,
         }
 
     def fail(self, method: str, status: int, body: Any, times: int = 1) -> None:
@@ -246,6 +252,9 @@ class FakeTelegram:
         return None
 
     def handle(self, method: str, params: dict, files: dict[str, bytes]) -> tuple[int, Any, dict]:
+        delay = self.stall.get(params.get("chat_id")) if method == "sendMessage" else None
+        if delay:
+            time.sleep(delay)
         call = {"method": method, "params": params, "files": {k: len(v) for k, v in files.items()},
                 "file_bytes": files, "time": time.monotonic(), "status": 200}
         with self.lock:
@@ -354,6 +363,13 @@ class _TelegramHandler(_Handler):
         f = next((f for f in tg.files.values() if f["path"] == path), None)
         if not f:
             return self.send_bytes(404, b"not found")
+        if f["redirect"]:
+            # A hostile or compromised API endpoint bouncing the download.
+            self.send_response(302)
+            self.send_header("Location", f["redirect"])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if f["endless"]:
             # No Content-Length: the bot must enforce its own limit.
             self.send_response(200)

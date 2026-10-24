@@ -106,6 +106,9 @@ impl RateLimiter {
     }
 }
 
+/// Largest Bot API response accepted (a full getUpdates batch is far smaller).
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Longest Telegram flood-control wait retried inside a single call.
 const MAX_INLINE_RETRY_SECS: u64 = 30;
 
@@ -165,7 +168,23 @@ impl Bot {
 
     async fn decode<T: DeserializeOwned>(res: reqwest::Response) -> Result<T, TgError> {
         let status = res.status();
-        let bytes = res.bytes().await.map_err(TgError::from_reqwest)?;
+        // Bounded: a hostile or broken API server cannot exhaust memory.
+        if res.content_length().is_some_and(|n| n > MAX_RESPONSE_BYTES) {
+            return Err(TgError::Decode(format!(
+                "HTTP {status}: response too large"
+            )));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = res.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(TgError::from_reqwest)?;
+            if (bytes.len() + chunk.len()) as u64 > MAX_RESPONSE_BYTES {
+                return Err(TgError::Decode(format!(
+                    "HTTP {status}: response too large"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         let env: Envelope<T> = serde_json::from_slice(&bytes)
             .map_err(|e| TgError::Decode(format!("HTTP {status}: {e}")))?;
         if env.ok {
@@ -522,6 +541,24 @@ mod tests {
         assert!(matches!(err, TgError::Connect(_)));
         let text = format!("{err} {err:?}");
         assert!(!text.contains("SECRET-TOKEN-VALUE"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn oversized_responses_are_refused() {
+        let server = MockServer::start().await;
+        let huge = format!(
+            "{{\"ok\":true,\"result\":\"{}\"}}",
+            "A".repeat(17 * 1024 * 1024)
+        );
+        Mock::given(path(format!("/bot{TOKEN}/getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(huge))
+            .mount(&server)
+            .await;
+        let err = bot(&server).get_me().await.unwrap_err();
+        assert!(
+            matches!(&err, TgError::Decode(m) if m.contains("too large")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

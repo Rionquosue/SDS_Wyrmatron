@@ -3,7 +3,18 @@
 /// Telegram's limit is 4096 characters after entity parsing; keep a margin.
 pub const MESSAGE_LIMIT: usize = 4000;
 
-/// Escapes text for `parse_mode=HTML`. Only `<`, `>` and `&` need escaping.
+/// Characters removed from untrusted text: bidirectional overrides,
+/// embeddings and isolates (used to make text read differently from what it
+/// is, "Trojan Source"), direction marks, the BOM, and control characters
+/// other than newline and tab. Zero-width joiners stay: emoji need them.
+pub fn is_spoofing_char(c: char) -> bool {
+    matches!(c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{FEFF}')
+        || (c.is_control() && c != '\n' && c != '\t')
+}
+
+/// Escapes untrusted text for `parse_mode=HTML` (only `<`, `>` and `&` need
+/// escaping) and drops spoofing characters.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -11,6 +22,7 @@ pub fn escape(s: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '&' => out.push_str("&amp;"),
+            c if is_spoofing_char(c) => {}
             _ => out.push(c),
         }
     }
@@ -131,6 +143,21 @@ mod tests {
     #[test]
     fn escapes_only_html_specials() {
         assert_eq!(escape("a<b>&c\"'"), "a&lt;b&gt;&amp;c\"'");
+    }
+
+    #[test]
+    fn strips_spoofing_characters() {
+        // "Storage is UP" written with a right-to-left override.
+        assert_eq!(escape("Storage is \u{202E}NWOD\u{202C}"), "Storage is NWOD");
+        assert_eq!(
+            escape("a\u{2066}b\u{2069}\u{200F}c\u{FEFF}\u{0}\u{1b}[31m\r"),
+            "abc[31m"
+        );
+        // Newlines, tabs and emoji joiners are kept.
+        assert_eq!(
+            escape("line1\nline2\t👩\u{200D}💻"),
+            "line1\nline2\t👩\u{200D}💻"
+        );
     }
 
     #[test]
